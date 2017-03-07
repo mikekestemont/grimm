@@ -48,10 +48,10 @@ def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
 
     return letters
 
+
 def load_tales(bpath='../brothers-grimm-data/FairyTales/', year=None):
     Tale = namedtuple('tale', ['title', 'year', 'words'])
     tales = []
-
 
     if year:
 
