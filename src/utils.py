@@ -12,10 +12,11 @@ from glob import glob
 from collections import namedtuple, Counter
 import shutil
 
+
 def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
     Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee',
-                                    'day', 'month', 'year',
-                                    'words'])
+                                   'day', 'month', 'year',
+                                   'words'])
 
     letters = []
 
@@ -67,12 +68,13 @@ def load_tales(bpath='../brothers-grimm-data/FairyTales/', year=None):
 
 
 def filter_letters(letters, min_len=500,
-                    target_authors={'Jacob-Grimm', 'Wilhelm-Grimm'}):
-    
+                   target_authors={'Jacob-Grimm', 'Wilhelm-Grimm'}):
+
     letters = [l for l in letters if len(l.words) >= min_len]
     letters = [l for l in letters if l.author in target_authors]
 
     return letters
+
 
 def plot_confusion_matrix(cm, target_names,
                           title='Confusion matrix',
@@ -100,9 +102,10 @@ def save_letters(letters):
     except:
         pass
     os.mkdir('clean/')
-    
+
     for l in letters:
-        fn = '-'.join([l.year, l.month, l.day]) + '_' + l.author + '-'.join([l.id1, l.id2]) + '.txt'
+        fn = '-'.join([l.year, l.month, l.day]) + '_' + \
+             l.author + '-'.join([l.id1, l.id2]) + '.txt'
         text = ' '.join(l.words)
         with open('clean/'+fn, 'w') as f:
             f.write(text)
