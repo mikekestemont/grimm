@@ -1,4 +1,19 @@
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from gensim.models import Word2Vec
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+from nltk import sent_tokenize
+from sklearn.cluster import AgglomerativeClustering
+
 from utils import *
+
+from collections import Counter
+import gensim
 
 tales = load_tales(year=1857)
 text = ' '.join([' '.join(t.words) for t in tales])
@@ -6,19 +21,12 @@ text = ' '.join([' '.join(t.words) for t in tales])
 with open('big.txt', 'w') as f:
     f.write(text)
 
-import fasttext
+sentences = [sent.split() for sent in sent_tokenize(text)]
 
+
+import fasttext
 model = fasttext.skipgram('big.txt', 'model')
 
-a = model['ich']
-b = model['mich']
-c = model['esel']
-d = model['esels']
-
-from scipy.spatial.distance import cosine
-print(cosine(a, b))
-print(cosine(b, c))
-print(cosine(c, d))
 
 # count most frequent words (mfi):
 cnt = Counter()
@@ -63,5 +71,6 @@ ax1.set_xticklabels([])
 ax1.set_xticks([])
 ax1.set_yticklabels([])
 ax1.set_yticks([])
-sns.plt.savefig("embeddings.pdf", bbox_inches=0)
+sns.plt.savefig("embeddings_fasttext.pdf", bbox_inches=0)
+
 
