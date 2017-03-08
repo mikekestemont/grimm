@@ -6,7 +6,7 @@ sns.set_style("whitegrid", {'axes.grid' : False})
 import numpy as np
 
 from itertools import product
-
+import random
 import os
 from glob import glob
 from collections import namedtuple, Counter
@@ -109,3 +109,21 @@ def save_letters(letters):
         text = ' '.join(l.words)
         with open('clean/'+fn, 'w') as f:
             f.write(text)
+
+
+def split_list(l, test, dev):
+    train = 1 - (test + dev)
+    assert train + test + dev == 1.0, \
+        "Illegal splits [%g, %g, %g]" % (train, test, dev)
+    train = int(train * len(l))
+    test = int(test * len(l))
+    dev = int(dev * len(l))
+    return l[:train], l[train:test+train], l[test+train:]
+
+
+def split(letters, test=0.1, dev=0.1):
+    random.shuffle(letters)
+    jacob, wilhelm = [], []
+    for l in letters:
+        (jacob, wilhelm)[l.author == 'Jacob-Grimm'].append(l)
+    return split_list(jacob, test, dev), split_list(wilhelm, test, dev)
