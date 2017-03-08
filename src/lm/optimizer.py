@@ -23,7 +23,7 @@ class Optimizer(object):
         self.optim = getattr(optim, self.method)(self.params, lr=self.lr)
 
     def set_params(self, params):
-        self.params = params
+        self.params = list(params)
         self.optim = getattr(optim, self.method)(self.params, lr=self.lr)
 
     def LP(self, p=1):

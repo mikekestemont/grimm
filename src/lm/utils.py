@@ -15,6 +15,7 @@ PAD = '<pad>'
 class EarlyStopping(Exception):
     def __init(self, message, data={}):
         super(EarlyStopping, self).__init__(message)
+        self.message = message
         self.data = data
 
 
