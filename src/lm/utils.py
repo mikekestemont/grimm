@@ -1,9 +1,14 @@
 
+import time
+import math
 from collections import OrderedDict
 from itertools import groupby
 
 import numpy as np
 import torch
+from torch.autograd import Variable
+
+import utils as u
 
 
 BOS = '<bos>'
@@ -45,29 +50,6 @@ def tile(t, times):
     return t.unsqueeze(0).expand(times, *t.size())
 
 
-def bmv(bm, v):
-    """
-    Parameters:
-    -----------
-    bm: (batch x dim1 x dim2)
-    v: (dim2)
-
-    Returns: batch-wise product of m and v (batch x dim1 x 1)
-    """
-    batch = bm.size(0)
-    # v -> (batch x dim2 x 1)
-    bv = v.unsqueeze(0).expand(batch, v.size(0)).unsqueeze(2)
-    return bm.bmm(bv)
-
-
-def repeat(x, size):
-    """
-    Utility function for the missing (as of 7. Feb. 2017) repeat
-    method for Variable's
-    """
-    return torch.autograd.Variable(x.data.repeat(*size))
-
-
 def swap(x, dim, perm):
     """
     swap the entries of a tensor in given dimension according to a given perm
@@ -79,7 +61,7 @@ def swap(x, dim, perm):
     """
     if isinstance(perm, list):
         perm = torch.LongTensor(perm)
-    return torch.autograd.Variable(x.data.index_select(dim, perm))
+    return Variable(x.data.index_select(dim, perm))
 
 
 def repackage_bidi(h_or_c):
@@ -242,3 +224,117 @@ def log_grad(module, grad_input, grad_output):
         module=module.__class__.__name__,
         grad_input=grad_norm_str(grad_input),
         grad_output=grad_norm_str(grad_output)))
+
+
+# Training code
+def make_criterion(vocab_size, mask_ids=()):
+    weight = torch.ones(vocab_size)
+    for mask in mask_ids:
+        weight[mask] = 0
+    return nn.CrossEntropyLoss(weight=weight)
+
+
+def repackage_hidden(h):
+    if type(h) == Variable:
+        return Variable(h.data)
+    else:
+        return tuple(repackage_hidden(v) for v in h)
+
+
+def validate_model(model, data, criterion, subset=None):
+    loss, hidden = 0, None
+    for i in range(0, len(data) - 1):
+        source, targets, *head = data[i]
+        if len(head) > 0:
+            if subset is not None and subset != head[0]:
+                continue
+            output, hidden = model(source, hidden=hidden, head=head[0])
+        else:
+            output, hidden = model(source, hidden=hidden)
+            # since loss is averaged across observations for each minibatch
+            loss += len(source) * criterion(output, targets).data[0]
+            hidden = repackage_hidden(hidden)
+    return loss / (len(data) * data.bptt)
+
+
+def train_epoch(model, data, optim, criterion, epoch, checkpoint,
+                hook=0, on_hook=None, subset=None):
+    """
+    hook: compute `on_hook` every `hook` checkpoints
+    """
+    epoch_loss, batch_loss, report_words, hidden = 0, 0, 0, None
+    start = time.time()
+
+    for b, i in enumerate(range(0, len(data) - 1)):
+        model.zero_grad()
+        source, targets, *head = data[i]
+        if len(head) > 0:
+            if subset is not None and subset != head[0]:
+                continue
+            output, hidden = model(source, hidden=hidden, head=head[0])
+        else:
+            output, hidden = model(source, hidden=hidden)
+        loss = criterion(output, targets)
+        hidden = repackage_hidden(hidden)
+        loss.backward(), optim.step()
+        # since loss is averaged across observations for each minibatch
+        epoch_loss += len(source) * loss.data[0]
+        batch_loss += loss.data[0]
+        report_words += targets.nelement()
+
+        if b % checkpoint == 0 and b > 0:
+            print("Epoch %d, %5d/%5d batches; ppl: %6.2f; %3.0f tokens/s" %
+                  (epoch, b, len(data), math.exp(batch_loss / checkpoint),
+                   report_words / (time.time() - start)))
+            report_words = batch_loss = 0
+            start = time.time()
+            # call thunk every `hook` checkpoints
+            if hook and (b // checkpoint) % hook == 0:
+                if on_hook is not None:
+                    on_hook(b // checkpoint)
+    return epoch_loss / (len(data) * data.bptt)
+
+
+def train_model(model, train, valid, test, optim, epochs, criterion,
+                gpu=False, early_stop=3, checkpoint=50, hook=10, subset=None):
+    if gpu:
+        criterion.cuda(), model.cuda()
+
+    # hook function
+    last_val_ppl, num_idle_hooks = float('inf'), 0
+
+    def on_hook(checkpoint):
+        nonlocal last_val_ppl, num_idle_hooks
+        model.eval()
+        valid_loss = validate_model(model, valid, criterion, subset=subset)
+        if optim.method == 'SGD':
+            last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_loss)
+            if last_lr != new_lr:
+                print("Decaying lr [%f -> %f]" % (last_lr, new_lr))
+        if valid_loss >= last_val_ppl:  # update idle checkpoints
+            num_idle_hooks += 1
+        last_val_ppl = valid_loss
+        if num_idle_hooks >= early_stop:  # check for early stopping
+            message = "Stopping after %d idle checkpoints" % num_idle_hooks
+            raise u.EarlyStopping(message, {})
+        model.train()
+        print("Valid perplexity: %g" % math.exp(min(valid_loss, 100)))
+
+    print(" * number of train batches. %d" % len(train))
+    print(" * number of parameters. %d" % model.n_params())
+
+    for epoch in range(1, epochs + 1):
+        # train
+        model.train()
+        train_loss = train_epoch(
+            model, train, optim, criterion, epoch, checkpoint,
+            hook=hook, on_hook=on_hook, subset=subset)
+        print("Train perplexity: %g" % math.exp(min(train_loss, 100)))
+        # val
+        model.eval()
+        valid_loss = validate_model(model, valid, criterion, subset=subset)
+        print("Valid perplexity: %g" % math.exp(min(valid_loss, 100)))
+    # test
+    test_loss = validate_model(model, test, criterion, subset=subset)
+    print("Test perplexity: %g" % math.exp(test_loss))
+    return math.exp(test_loss)

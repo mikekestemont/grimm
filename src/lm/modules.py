@@ -2,6 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
+
+import utils as u
+from beam_search import Beam
 
 
 class StackedRNN(nn.Module):
@@ -99,6 +103,12 @@ class MaxOut(nn.Module):
 
 
 class TiedEmbedding(nn.Embedding):
+    """
+    Custom embeddings layer that takes an external weight parameter.
+    This is useful for tying the embedding weights with another layer,
+    typically the output vocabulary distribution (output embeddings).
+    See TiedLinear.
+    """
     def __init__(self, num_embeddings, embedding_dim, weight, **kwargs):
         super(TiedEmbedding, self).__init__(
             num_embeddings, embedding_dim, **kwargs)
@@ -107,6 +117,12 @@ class TiedEmbedding(nn.Embedding):
 
 
 class TiedLinear(nn.Linear):
+    """
+    Custom linear layer that takes an external weight parameter.
+    This is useful for tying the linear weights with another layer,
+    typically the input vocabulary distribution (input embeddings).
+    See TiedEmbedding.
+    """
     def __init__(self, in_features, out_features, weight, bias=True):
         super(TiedLinear, self).__init__(in_features, out_features, bias=bias)
         assert isinstance(weight, nn.parameter.Parameter)
@@ -114,6 +130,27 @@ class TiedLinear(nn.Linear):
 
 
 class LM(nn.Module):
+    """
+    Vanilla RNN-based language model.
+
+    Parameters:
+    -----------
+    vocab: int, vocabulary size.
+    emb_dim: int, embedding size,
+        This value has to be equal to hid_dim if tie_weights is True and
+        project_on_tied_weights is False, otherwise input and output
+        embedding dimensions wouldn't match and weights cannot be tied.
+    hid_dim: int, hidden dimension of the RNN.
+    num_layers: int, number of layers of the RNN.
+    cell: str, one of GRU, LSTM.
+    bias: bool, whether to include bias in the RNN.
+    dropout: float, amount of dropout to apply in between layers.
+    tie_weights: bool, whether to tie input and output embedding layers.
+    project_on_tied_weights: bool,
+        In case of unequal emb_dim and hid_dim values this option has to
+        be True if tie_weights is True. A linear project layer will be
+        inserted after the RNN to match back to the embedding dimension.
+    """
     def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
                  cell='GRU', bias=True, dropout=0.0, tie_weights=False,
                  project_on_tied_weights=False):
@@ -133,30 +170,37 @@ class LM(nn.Module):
         self.dropout = dropout
 
         super(LM, self).__init__()
+        # input embeddings
         weight = None
         if tie_weights:
             weight = nn.parameter.Parameter(torch.randn(vocab, emb_dim))
             self.embeddings = TiedEmbedding(vocab, self.emb_dim, weight)
         else:
             self.embeddings = nn.Embedding(vocab, self.emb_dim)
+        # rnn
         self.rnn = getattr(nn, cell)(
             self.emb_dim, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
-        if tie_weights:
+        # output embeddings
+        if not tie_weights:
+            self.project = nn.Linear(self.hid_dim, vocab)
+        else:
             if self.emb_dim == self.hid_dim:
                 self.project = TiedLinear(self.hid_dim, vocab, weight)
             else:
-                assert project_on_tied_weights
+                assert project_on_tied_weights, \
+                    "Unequal tied layer dims but no projection layer"
                 self.project = nn.Sequential(
                     nn.Linear(self.hid_dim, self.emb_dim),
                     TiedLinear(self.emb_dim, vocab, weight))
-        else:
-            self.project = nn.Linear(self.hid_dim, vocab)
 
     def parameters(self):
         for p in super(LM, self).parameters():
             if p.requires_grad is True:
                 yield p
+
+    def n_params(self):
+        return sum([p.nelement() for p in self.parameters()])
 
     def freeze_submodule(self, module):
         for p in getattr(self, module).parameters():
@@ -171,18 +215,6 @@ class LM(nn.Module):
         else:
             c_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
             return h_0, c_0
-
-    def forward(self, inp, hidden=None):
-        emb = self.embeddings(inp)
-        if self.has_dropout:
-            emb = F.dropout(emb, p=self.dropout, training=self.training)
-        outs, hidden = self.rnn(emb, hidden or self.init_hidden_for(emb))
-        if self.has_dropout:
-            outs = F.dropout(outs, p=self.dropout, training=self.training)
-        seq_len, batch, hid_dim = outs.size()
-        # (seq_len x batch x hid) -> (seq_len * batch x hid)
-        logs = self.project(outs.view(seq_len * batch, hid_dim))
-        return logs, hidden
 
     def generate_beam(self, bos, eos, max_seq_len=20, width=5, gpu=False):
         "Generate text using beam search decoding"
@@ -214,28 +246,97 @@ class LM(nn.Module):
                 break
         return [hyp]
 
+    def forward(self, inp, hidden=None, **kwargs):
+        emb = self.embeddings(inp)
+        if self.has_dropout:
+            emb = F.dropout(emb, p=self.dropout, training=self.training)
+        outs, hidden = self.rnn(emb, hidden or self.init_hidden_for(emb))
+        if self.has_dropout:
+            outs = F.dropout(outs, p=self.dropout, training=self.training)
+        seq_len, batch, hid_dim = outs.size()
+        # (seq_len x batch x hid) -> (seq_len * batch x hid)
+        logs = self.project(outs.view(seq_len * batch, hid_dim))
+        return logs, hidden
+
 
 class ForkableLM(LM):
+    """
+    A LM model that allows to create forks of the current instance with
+    frozen Embedding (and eventually RNN) layers for fine tunning the
+    non-frozen parameters to particular dataset.
+    The parent cannot have the projection layer for tied embeddings,
+    since tied layers don't fit in this setup.
+    """
     def __init__(self, *args, **kwargs):
-        super(LM, self).__init__(*args, **kwargs)
+        super(ForkableLM, self).__init__(*args, **kwargs)
 
-    def fork_model(self):
-        model = LM(self.vocab, self.emb_dim, self.hid_dim,
-                   num_layers=self.num_layers, cell=self.cell, bias=self.bias,
-                   dropout=self.dropout, tie_weights=False,
-                   project_on_tied_weights=False)
-        state_dict = model.state_dict()
-        state_dict['embeddings.weight'] = self.state_dict()['embeddings.weight']
-        for layer, p in self.state_dict().items():
+    def fork_model(self, freeze_rnn=True):
+        """
+        Creates a child fork from the current model with frozen input
+        embeddings (and eventually also frozen RNN).
+
+        Parameters:
+        -----------
+        freeze_rnn: optional, whether to also freeze the child RNN layer.
+        """
+        model = LM(
+            self.vocab, self.emb_dim, self.hid_dim, num_layers=self.num_layers,
+            cell=self.cell, dropout=self.dropout, bias=self.bias,
+            tie_weights=False, project_on_tied_weights=False)
+        source_dict, target_dict = self.state_dict(), model.state_dict()
+        target_dict['embeddings.weight'] = source_dict()['embeddings.weight']
+        for layer, p in source_dict.items():
             if layer.startswith('project') and \
                self.tie_weights and \
                self.project_on_tied_weights:
-                print("Warning: Forked model couldn't use projection layer of" +
-                      "parent for the initialization of layer [%s]" % layer)
+                print("Warning: Forked model couldn't use projection layer " +
+                      "of parent for the initialization of layer [%s]" % layer)
                 continue
             else:
-                state_dict[layer] = p
-        model.load_state_dict(state_dict)
+                target_dict[layer] = p
+        model.load_state_dict(target_dict)
         model.freeze_submodule('embeddings')
-        model.freeze_submodule('rnn')
+        if freeze_rnn:
+            model.freeze_submodule('rnn')
         return model
+
+
+class MultiheadLM(LM):
+    """
+    A variant LM that has multiple output embeddings (one for each of a
+    given number of heads). This allows the model to fine tune different
+    output distribution on different datasets.
+    """
+    def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
+                 cell='GRU', bias=True, dropout=0.0, head_names=(), **kwargs):
+        assert head_names, "MultiheadLM requires at least 1 head but got 0"
+        self.vocab = vocab
+        self.emb_dim = emb_dim
+        self.hid_dim = hid_dim
+        self.num_layers = num_layers
+        self.cell = cell
+        self.bias = bias
+        self.has_dropout = bool(dropout)
+        self.dropout = dropout
+        self.head_names = head_names
+
+        super(LM, self).__init__()
+        self.embeddings = nn.Embedding(vocab, self.emb_dim)
+        self.rnn = getattr(nn, cell)(
+            self.emb_dim, self.hid_dim,
+            num_layers=num_layers, bias=bias, dropout=dropout)
+        self.project = {
+            head: nn.Linear(self.hid_dim, vocab) for head in head_names}
+
+    def forward(self, inp, hidden=None, head=None):
+        """"""
+        emb = self.embeddings(inp)
+        if self.has_dropout:
+            emb = F.dropout(emb, p=self.dropout, training=self.training)
+        outs, hidden = self.rnn(emb, hidden or self.init_hidden_for(emb))
+        if self.has_dropout:
+            outs = F.dropout(outs, p=self.dropout, training=self.training)
+        seq_len, batch, hid_dim = outs.size()
+        # (seq_len x batch x hid) -> (seq_len * batch x hid)
+        logs = self.project[head](outs.view(seq_len * batch, hid_dim))
+        return logs, hidden

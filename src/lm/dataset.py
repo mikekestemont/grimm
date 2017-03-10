@@ -3,6 +3,7 @@ import random
 from collections import Counter
 
 import torch
+from torch.autograd import Variable
 
 
 def shuffled(data):
@@ -21,10 +22,16 @@ def cumsum(seq):
     return [sum(subseq) for subseq in subseqs]
 
 
+def get_splits(length, test, dev=None):
+    splits = [split for split in [dev, test] if split]
+    train = 1 - sum(splits)
+    assert train > 0, "dev and test proportions must add to at most 1"
+    return cumsum(int(length * i) for i in [train, dev, test] if i)
+
+
 def batchify(examples, pad_token=None, align_right=False):
     max_length = max(len(x) for x in examples)
-    out = torch.LongTensor(len(examples), max_length) \
-               .fill_(pad_token or 0)
+    out = torch.LongTensor(len(examples), max_length).fill_(pad_token or 0)
     for i in range(len(examples)):
         example = torch.Tensor(examples[i])
         example_length = example.size(0)
@@ -32,6 +39,14 @@ def batchify(examples, pad_token=None, align_right=False):
         out[i].narrow(0, offset, example_length).copy_(example)
     out = out.t().contiguous()
     return out
+
+
+def block_batchify(vector, batch_size):
+    vector = torch.LongTensor(vector)
+    num_batches = len(vector) // batch_size
+    batches = vector.narrow(0, 0, num_batches * batch_size)
+    batches = batches.view(batch_size, -1).t().contiguous()
+    return batches
 
 
 class Dict(object):
@@ -151,7 +166,7 @@ class Dataset(object):
             "Batch size larger than data [%d > %d]" % (batch_size, total_len)
         return BatchIterator(self, batch_size, **kwargs)
 
-    def splits(self, dev=0.1, test=0.2, shuffle=False,
+    def splits(self, test=0.1, dev=0.2, shuffle=False,
                batchify=False, batch_size=None, sort_key=None, **kwargs):
         """
         Compute splits on dataset instance. For convenience, it can return
@@ -165,14 +180,12 @@ class Dataset(object):
             batch_size: int, only needed if batchify is True
             kwargs: optional arguments passed to the BatchIterator constructor
         """
-        train = 1 - sum(split for split in [dev, test] if split)
-        assert train > 0, "dev and test proportions must add to less than 1"
         if shuffle:
             src, trg = shuffle_pairs(self.src, self.trg)
         else:
             src, trg = self.src, self.trg
-        splits = cumsum(int(len(src) * i) for i in [train, dev, test] if i)
-        datasets = [Dataset(src[i:j], trg[i:j], self.dicts, fitted=True) \
+        splits = get_splits(len(src), test, dev=dev)
+        datasets = [Dataset(src[i:j], trg[i:j], self.dicts, fitted=True)
                     .sort_(sort_key) for i, j in zip(splits, splits[1:])]
         if batchify:
             return tuple([s.batches(batch_size, **kwargs) for s in datasets])
@@ -209,12 +222,12 @@ class BatchIterator(object):
         out = batchify(batch_data, pad_token, align_right=self.align_right)
         if self.gpu:
             out = out.cuda()
-        return torch.autograd.Variable(out, volatile=self.evaluation)
+        return Variable(out, volatile=self.evaluation)
 
     def __getitem__(self, idx):
         assert idx < self.num_batches, "%d >= %d" % (idx, self.num_batches)
         batch_from = idx * self.batch_size
-        batch_to = (idx+1)*self.batch_size
+        batch_to = (idx+1) * self.batch_size
         src_pad = self.dataset.dicts['src'].get_pad()
         trg_pad = self.dataset.dicts['trg'].get_pad()
         src_batch = self._batchify(self.src[batch_from: batch_to], src_pad)
@@ -225,6 +238,75 @@ class BatchIterator(object):
         return self.num_batches
 
 
-if __name__ == '__main__':
-    # load file parse it and store to file
-    pass
+class BlockDataset(object):
+    def __init__(self, examples, src_dict, batch_size, bptt,
+                 fitted=False, gpu=False, evaluation=False):
+        if isinstance(examples, dict):
+            self.data = {}
+            for name, subdata in examples.items():
+                if fitted:
+                    self.data[name] = subdata
+                else:
+                    self.data[name] = list(src_dict.transform(subdata))
+                self.data[name] = block_batchify(self.data[name], batch_size)
+            self.names = list(self.data.keys())
+        else:
+            data = examples if fitted else list(src_dict.transform(examples))
+            self.data = block_batchify(data, batch_size)
+
+        self.src_dict = src_dict
+        self.batch_size = batch_size
+        self.bptt = bptt
+        self.fitted = fitted
+        self.gpu = gpu
+        self.evaluation = evaluation
+
+    def _next_item(self, idx):
+        idx, dataset = divmod(idx, len(self.data))
+        name = self.names[dataset]
+        data = self.data[name]
+        return idx, name, data
+
+    def __getitem__(self, idx):
+        if isinstance(self.data, dict):
+            idx, name, data = self._next_item(idx)
+        else:
+            data = self.data
+        idx *= self.bptt
+        seq_len = min(self.bptt, len(data) - 1 - idx)
+        src = Variable(data[idx:idx+seq_len], volatile=self.evaluation)
+        trg = Variable(data[idx+1:idx+seq_len+1].view(-1),
+                       volatile=self.evaluation)
+        if self.gpu:
+            src, trg = src.cuda(), trg.cuda()
+        if isinstance(self.data, dict):
+            return src, trg, name
+        else:
+            return src, trg
+
+    def __len__(self):
+        if isinstance(self.data, dict):
+            length = min(len(d) for d in self.data.values()) * len(self.data)
+        else:
+            length = len(self.data)
+        return length // self.bptt
+
+    def splits(self, test=0.1, dev=0.1):
+        datasets, splits = [], get_splits(len(self) * self.bptt, test, dev=dev)
+        for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
+            evaluation = self.evaluation if idx == 0 else True
+            if isinstance(self.data, dict):
+                start = start // len(self.data)
+                stop = stop // len(self.data)
+                dataset = {}
+                for name, data in self.data.items():
+                    dataset[name] = data[start:stop]
+                datasets.append(BlockDataset(
+                    dataset, self.src_dict, self.batch_size, self.bptt,
+                    fitted=True, gpu=self.gpu, evaluation=evaluation))
+            else:
+                datasets.append(BlockDataset(
+                    self.data[start:stop], self.src_dict, self.batch_size,
+                    self.bptt, fitted=True, gpu=self.gpu,
+                    evaluation=evaluation))
+        return tuple(datasets)

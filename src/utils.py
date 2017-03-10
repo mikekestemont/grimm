@@ -15,8 +15,7 @@ import shutil
 
 def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
     Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee',
-                                   'day', 'month', 'year',
-                                   'words'])
+                                   'day', 'month', 'year', 'words', 'lines'])
 
     letters = []
 
@@ -41,7 +40,8 @@ def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
 
                 words = ' '.join(no_comment).lower().split()
 
-            letters.append(Letter(id1, id2, send, addr, d, m, y, words))
+            letter = Letter(id1, id2, send, addr, d, m, y, words, no_comment)
+            letters.append(letter)
 
         except:
             print('parsing error:', bn)
@@ -111,19 +111,9 @@ def save_letters(letters):
             f.write(text)
 
 
-def split_list(l, test, dev):
-    train = 1 - (test + dev)
-    assert train + test + dev == 1.0, \
-        "Illegal splits [%g, %g, %g]" % (train, test, dev)
-    train = int(train * len(l))
-    test = int(test * len(l))
-    dev = int(dev * len(l))
-    return l[:train], l[train:test+train], l[test+train:]
-
-
 def split(letters, test=0.1, dev=0.1):
     random.shuffle(letters)
     jacob, wilhelm = [], []
     for l in letters:
         (jacob, wilhelm)[l.author == 'Jacob-Grimm'].append(l)
-    return split_list(jacob, test, dev), split_list(wilhelm, test, dev)
+    return jacob, wilhelm
