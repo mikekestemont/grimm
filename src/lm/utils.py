@@ -94,6 +94,21 @@ def map_index(t, source_idx, target_idx):
     return t.masked_fill_(t.eq(source_idx), target_idx)
 
 
+def select_cols(t, vec):
+    """
+    Select columns in t according to vec.
+
+    Parameters:
+    -----------
+    - t: torch.Tensor (m x n)
+    - vec: list with indices of length m with the longest integer at most n.
+    """
+    nrows, ncols = t.size()
+    rows = torch.LongTensor(list(range(ncols))).repeat(nrows, 1)
+    vec = torch.LongTensor(vec).unsqueeze(1).repeat(1, ncols)
+    return t[rows == vec]
+
+
 # Initializers
 def default_weight_init(m, init_range=0.05):
     for p in m.parameters():

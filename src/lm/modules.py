@@ -217,14 +217,16 @@ class LM(nn.Module):
             c_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
             return h_0, c_0
 
-    def generate_beam(self, bos, eos, max_seq_len=20, width=5, gpu=False):
+    def generate_beam(self, bos, eos,
+                      max_seq_len=20, width=5, gpu=False, **kwargs):
         "Generate text using beam search decoding"
+        self.eval()
         beam = Beam(width, bos, eos, gpu=gpu)
         hidden = self.init_hidden_for(beam.get_current_state())
         while beam.active and len(beam) < max_seq_len:
             prev = Variable(
                 beam.get_current_state().unsqueeze(0), volatile=True)
-            logs, hidden = self(prev, hidden=hidden)
+            logs, hidden = self(prev, hidden=hidden, **kwargs)
             beam.advance(logs.data)
             if self.cell.startswith('LSTM'):
                 hidden = (u.swap(hidden[0], 1, beam.get_source_beam()),
@@ -232,20 +234,29 @@ class LM(nn.Module):
             else:
                 hidden = u.swap(hidden, 1, beam.get_source_beam())
         scores, hyps = beam.decode()
-        return hyps
+        return scores, hyps
 
-    def generate(self, bos, eos, max_seq_len=20, beam=None, gpu=False):
+    def generate(self, bos, eos,
+                 max_seq_len=20, beam=None, gpu=False, **kwargs):
         "Generate text using simple argmax decoding"
+        self.eval()
         prev = Variable(torch.LongTensor([bos]).unsqueeze(0), volatile=True)
         if gpu: prev = prev.cuda()
-        hidden, hyp = None, []
+        hidden, hyp, score = None, [], []
         for _ in range(max_seq_len):
-            logs, hidden = self(prev, hidden=hidden)
-            prev = logs.max(1)[1].t()
-            hyp.append(prev)
+            logs, hidden = self(prev, hidden=hidden, **kwargs)
+            best_score, prev = logs.max(1)
+            prev = prev.t()
+            hyp.append(prev), score.append(best_score)
             if prev.data.eq(eos).nonzero().nelement() > 0:
                 break
-        return [hyp]
+        return [score], [hyp]
+
+    def predict_proba(self, inp, gpu=False, **kwargs):
+        self.eval()
+        logs, hidden = self(
+            Variable(torch.LongTensor([inp]), volatile=True), **kwargs)
+        return u.select_cols(logs, inp).sum()
 
     def forward(self, inp, hidden=None, **kwargs):
         emb = self.embeddings(inp)
