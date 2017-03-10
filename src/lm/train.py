@@ -28,7 +28,7 @@ def letters2lines(letters):
 
 def train_model_fork(
         model, train, valid, test, optim, epochs, criterion,
-        gpu=False, early_stop=3, checkpoint=10, hook=10):
+        gpu=False, early_stop=3, checkpoint=50, hook=10):
     print("Training main")
     u.train_model(
         model, train, valid, test, optim, epochs, criterion,
@@ -71,7 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=200, type=int)
     parser.add_argument('--bptt', default=10, type=int)
     parser.add_argument('--epochs', default=10, type=int)
-    parser.add_argument('--checkpoint', default=10, type=int)
+    parser.add_argument('--checkpoint', default=50, type=int)
     parser.add_argument('--hook', default=10, type=int,
                         help='Compute valid ppl after so many checkpoints')
     parser.add_argument('--optim', default='RMSprop', type=str)
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     model = model_type(
         len(d), args.emb_dim, args.hid_dim, cell=args.cell,
         num_layers=args.layers, dropout=args.dropout,
-        tie_weights=args.tie_weights, head_names=('W', 'J'),
+        tie_weights=args.tie_weights, heads=('W', 'J'),
         project_on_tied_weights=args.project_on_tied_weights)
 
     model.apply(u.Initializer.make_initializer())

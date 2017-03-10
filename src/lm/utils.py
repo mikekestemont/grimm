@@ -53,9 +53,9 @@ def tile(t, times):
 def swap(x, dim, perm):
     """
     swap the entries of a tensor in given dimension according to a given perm
-    dim: int,
+    - dim: int,
         It has to be less than total number of dimensions in x.
-    perm: list or torch.LongTensor,
+    - perm: list or torch.LongTensor,
         It has to be as long as the specified dimension and it can only contain
         unique elements.
     """
@@ -67,12 +67,12 @@ def swap(x, dim, perm):
 def repackage_bidi(h_or_c):
     """
     In a bidirectional RNN output is (output, (h_n, c_n))
-      output: (seq_len x batch x hid_dim * 2)
-      h_n: (num_layers * 2 x batch x hid_dim)
-      c_n: (num_layers * 2 x batch x hid_dim)
+    - output: (seq_len x batch x hid_dim * 2)
+    - h_n: (num_layers * 2 x batch x hid_dim)
+    - c_n: (num_layers * 2 x batch x hid_dim)
 
     This function turns a hidden input into:
-      (num_layers x batch x hid_dim * 2)
+        (num_layers x batch x hid_dim * 2)
     """
     layers_2, bs, hid_dim = h_or_c.size()
     return h_or_c.view(layers_2 // 2, 2, bs, hid_dim) \

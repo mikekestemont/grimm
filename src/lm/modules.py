@@ -26,18 +26,19 @@ class StackedRNN(nn.Module):
     def forward(self, inp, hidden):
         """
         Parameters:
-        -----------
-        inp: torch.Tensor (batch x inp_dim),
+        ==========
+        - inp: torch.Tensor (batch x inp_dim),
             Tensor holding the target for the previous decoding step,
             inp_dim = emb_dim or emb_dim + hid_dim if self.add_pred is True.
-        hidden: tuple (h_c, c_0), output of previous step or init hidden at 0,
+        - hidden: tuple (h_c, c_0), output of previous step
             h_c: (num_layers x batch x hid_dim)
             n_c: (num_layers x batch x hid_dim)
+
         Returns: output, (h_n, c_n)
-        --------
-        output: torch.Tensor (batch x hid_dim)
-        h_n: torch.Tensor (num_layers x batch x hid_dim)
-        c_n: torch.Tensor (num_layers x batch x hid_dim)
+        ==========
+        - output: torch.Tensor (batch x hid_dim)
+        - h_n: torch.Tensor (num_layers x batch x hid_dim)
+        - c_n: torch.Tensor (num_layers x batch x hid_dim)
         """
         if self.cell.startswith('LSTM'):
             h_0, c_0 = hidden
@@ -76,14 +77,14 @@ class MaxOut(nn.Module):
         j ranges over K and ... corresponds to the input dimension)
 
         Parameters:
-        -----------
-        in_dim: int, Input dimension
-        out_dim: int, Output dimension
-        k: int, number of "pools" to max over
+        ===========
+        - in_dim: int, Input dimension
+        - out_dim: int, Output dimension
+        - k: int, number of "pools" to max over
 
         Returns:
-        --------
-        out: torch.Tensor (batch x k)
+        ===========
+        - out: torch.Tensor (batch x k)
         """
         self.in_dim, self.out_dim, self.k = in_dim, out_dim, k
         super(MaxOut, self).__init__()
@@ -134,19 +135,19 @@ class LM(nn.Module):
     Vanilla RNN-based language model.
 
     Parameters:
-    -----------
-    vocab: int, vocabulary size.
-    emb_dim: int, embedding size,
+    ===========
+    - vocab: int, vocabulary size.
+    - emb_dim: int, embedding size,
         This value has to be equal to hid_dim if tie_weights is True and
         project_on_tied_weights is False, otherwise input and output
         embedding dimensions wouldn't match and weights cannot be tied.
-    hid_dim: int, hidden dimension of the RNN.
-    num_layers: int, number of layers of the RNN.
-    cell: str, one of GRU, LSTM.
-    bias: bool, whether to include bias in the RNN.
-    dropout: float, amount of dropout to apply in between layers.
-    tie_weights: bool, whether to tie input and output embedding layers.
-    project_on_tied_weights: bool,
+    - hid_dim: int, hidden dimension of the RNN.
+    - num_layers: int, number of layers of the RNN.
+    - cell: str, one of GRU, LSTM.
+    - bias: bool, whether to include bias in the RNN.
+    - dropout: float, amount of dropout to apply in between layers.
+    - tie_weights: bool, whether to tie input and output embedding layers.
+    - project_on_tied_weights: bool,
         In case of unequal emb_dim and hid_dim values this option has to
         be True if tie_weights is True. A linear project layer will be
         inserted after the RNN to match back to the embedding dimension.
@@ -276,8 +277,8 @@ class ForkableLM(LM):
         embeddings (and eventually also frozen RNN).
 
         Parameters:
-        -----------
-        freeze_rnn: optional, whether to also freeze the child RNN layer.
+        ===========
+        - freeze_rnn: optional, whether to also freeze the child RNN layer.
         """
         model = LM(
             self.vocab, self.emb_dim, self.hid_dim, num_layers=self.num_layers,
@@ -308,8 +309,8 @@ class MultiheadLM(LM):
     output distribution on different datasets.
     """
     def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
-                 cell='GRU', bias=True, dropout=0.0, head_names=(), **kwargs):
-        assert head_names, "MultiheadLM requires at least 1 head but got 0"
+                 cell='GRU', bias=True, dropout=0.0, heads=(), **kwargs):
+        assert heads, "MultiheadLM requires at least 1 head but got 0"
         self.vocab = vocab
         self.emb_dim = emb_dim
         self.hid_dim = hid_dim
@@ -318,7 +319,7 @@ class MultiheadLM(LM):
         self.bias = bias
         self.has_dropout = bool(dropout)
         self.dropout = dropout
-        self.head_names = head_names
+        self.heads = heads
 
         super(LM, self).__init__()
         self.embeddings = nn.Embedding(vocab, self.emb_dim)
@@ -326,7 +327,7 @@ class MultiheadLM(LM):
             self.emb_dim, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
         self.project = {
-            head: nn.Linear(self.hid_dim, vocab) for head in head_names}
+            head: nn.Linear(self.hid_dim, vocab) for head in heads}
 
     def forward(self, inp, hidden=None, head=None):
         """"""

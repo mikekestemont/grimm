@@ -83,7 +83,7 @@ class Dict(object):
     def get_unk(self):
         return self.s2i.get(self.unk_token, None)
 
-    def _get_unk(self):
+    def _maybe_index_unk(self):
         if self.unk_token not in self.s2i:
             unk_code = self.s2i[self.unk_token] = len(self.vocab)
             self.vocab += [self.unk_token]
@@ -95,7 +95,7 @@ class Dict(object):
     def index(self, s):
         assert self.fitted, "Attempt to index without fitted data"
         if s not in self.s2i:
-            return self._get_unk()
+            return self._maybe_index_unk()
         else:
             return self.s2i[s]
 
