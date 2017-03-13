@@ -9,19 +9,12 @@ import torch
 from torch.autograd import Variable
 
 import utils as u
+from early_stopping import EarlyStopping, EarlyStoppingException
 
 
 BOS = '<bos>'
 EOS = '<eos>'
 PAD = '<pad>'
-
-
-# General utils
-class EarlyStopping(Exception):
-    def __init(self, message, data={}):
-        super(EarlyStopping, self).__init__(message)
-        self.message = message
-        self.data = data
 
 
 # Pytorch utils
@@ -267,8 +260,8 @@ def validate_model(model, data, criterion, subset=None):
         else:
             output, hidden = model(source, hidden=hidden)
             # since loss is averaged across observations for each minibatch
-            loss += len(source) * criterion(output, targets).data[0]
-            hidden = repackage_hidden(hidden)
+        loss += len(source) * criterion(output, targets).data[0]
+        hidden = repackage_hidden(hidden)
     return loss / (len(data) * data.bptt)
 
 
@@ -311,29 +304,25 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
 
 
 def train_model(model, train, valid, test, optim, epochs, criterion,
-                gpu=False, early_stop=3, checkpoint=50, hook=10, subset=None):
+                gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None):
     if gpu:
         criterion.cuda(), model.cuda()
 
-    # hook function
-    last_val_ppl, num_idle_hooks = float('inf'), 0
+    early_stop = EarlyStopping(early_stop)
 
     def on_hook(checkpoint):
-        nonlocal last_val_ppl, num_idle_hooks
         model.eval()
-        valid_loss = validate_model(model, valid, criterion, subset=subset)
+        valid_ppl = math.exp(validate_model(model, valid, criterion, subset=subset))
+        # log checkpoint
+        print("Valid perplexity: %g" % valid_ppl)
+        # maybe decay lr
         if optim.method == 'SGD':
-            last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_loss)
+            last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_ppl)
             if last_lr != new_lr:
                 print("Decaying lr [%f -> %f]" % (last_lr, new_lr))
-        if valid_loss >= last_val_ppl:  # update idle checkpoints
-            num_idle_hooks += 1
-        last_val_ppl = valid_loss
-        if num_idle_hooks >= early_stop:  # check for early stopping
-            message = "Stopping after %d idle checkpoints" % num_idle_hooks
-            raise u.EarlyStopping(message, {})
+        # early stopping
+        early_stop.add_checkpoint(valid_ppl)
         model.train()
-        print("Valid perplexity: %g" % math.exp(min(valid_loss, 100)))
 
     print(" * number of train batches. %d" % len(train))
     print(" * number of parameters. %d" % model.n_params())

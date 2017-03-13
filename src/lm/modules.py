@@ -291,7 +291,7 @@ class ForkableLM(LM):
         ===========
         - freeze_rnn: optional, whether to also freeze the child RNN layer.
         """
-        model = LM(
+        model = ForkableLM(
             self.vocab, self.emb_dim, self.hid_dim, num_layers=self.num_layers,
             cell=self.cell, dropout=self.dropout, bias=self.bias,
             tie_weights=False, project_on_tied_weights=False)
@@ -337,8 +337,11 @@ class MultiheadLM(LM):
         self.rnn = getattr(nn, cell)(
             self.emb_dim, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
-        self.project = {
-            head: nn.Linear(self.hid_dim, vocab) for head in heads}
+        self.project = {}
+        for head in heads:
+            module = nn.Linear(self.hid_dim, vocab)
+            self.add_module(head, module)
+            self.project[head] = module
 
     def forward(self, inp, hidden=None, head=None):
         """"""
@@ -352,3 +355,86 @@ class MultiheadLM(LM):
         # (seq_len x batch x hid) -> (seq_len * batch x hid)
         logs = self.project[head](outs.view(seq_len * batch, hid_dim))
         return logs, hidden
+
+
+def load_model(path):
+    if path.endswith('pickle'):
+        import pickle as p
+        load_fn = p.load
+    elif path.endswith('pt'):
+        import torch
+        load_fn = torch.load
+    else:
+        raise ValueError("Unknown file format [%s]" % path)
+    with open(path, 'rb') as f:
+        return load_fn(f)
+
+
+class LMContainer(object):
+    def __init__(self, models, d):
+        """
+        Constructor
+
+        Parameters:
+        ===========
+        - models, a dict mapping from head names to models or a MultiheadLM
+        - d, a Dict or a dict mapping from head names to Dict's
+        """
+        self.models = models
+        self.d = d
+        if isinstance(self.models, dict):
+            for model in self.models.values():
+                assert isinstance(model, ForkableLM), "Expected ForkableLM"
+            # forkable models
+            self.heads = list(d.keys())
+            self.get_head = lambda head: self.models[head]
+        elif isinstance(self.models, MultiheadLM):
+            self.heads = list(models.heads)
+            self.get_head = lambda head: self.models
+        else:
+            raise ValueError("Wrong model type %s" % type(models))
+
+    def predict_proba(self, text, author, gpu=False):
+        inp = [c for l in self.d.transform(text) for c in l]
+        return self.get_head(author).predict_proba(inp, head=author)
+
+    def to_disk(self, prefix, mode='torch'):
+        if mode == 'torch':
+            import torch
+            save_fn, ext = torch.save, 'pt'
+        elif mode == 'pickle':
+            import pickle as p
+            save_fn, ext = p.save, 'pickle'
+        else:
+            raise ValueError("Unknown mode [%s]" % mode)
+        if isinstance(self.models, dict):
+            # forkable models
+            for head, model in self.models.items():
+                with open(prefix + '_' + head + '.' + ext, 'wb') as f:
+                    save_fn(f, model)
+        else:
+            with open(prefix + '.' + ext, 'wb') as f:
+                save_fn(f, self.models)
+        with open(prefix + '.dict.' + ext, 'wb') as f:
+            save_fn(f, self.d)
+
+    @classmethod
+    def from_disk(cls, model_path, d_path):
+        """
+        Parameters:
+        ===========
+
+        - model_path: str,
+            Path to file with serialized MultiheadLM model, or dict from
+            heads to paths with ForkableLM models.
+        - d_path: str,
+            Path to file with serialized Dict.
+        """
+        if isinstance(model_path, dict):
+            model = {}
+            for k, path in model_path.items():
+                model[k] = load_model(path)
+        else:
+            model = load_model(model_path)
+        d = load_model(d_path)
+        return cls(model, d)

@@ -96,18 +96,18 @@ def plot_confusion_matrix(cm, target_names,
     plt.xlabel('Predicted label')
 
 
-def save_letters(letters):
+def save_letters(letters, target_dir='clean/'):
     try:
-        shutil.rmtree('clean/')
+        shutil.rmtree(target_dir)
     except:
         pass
-    os.mkdir('clean/')
+    os.mkdir(target_dir)
 
     for l in letters:
         fn = '-'.join([l.year, l.month, l.day]) + '_' + \
              l.author + '-'.join([l.id1, l.id2]) + '.txt'
         text = ' '.join(l.words)
-        with open('clean/'+fn, 'w') as f:
+        with open(target_dir + fn, 'w') as f:
             f.write(text)
 
 
@@ -117,3 +117,19 @@ def split(letters, test=0.1, dev=0.1):
     for l in letters:
         (jacob, wilhelm)[l.author == 'Jacob-Grimm'].append(l)
     return jacob, wilhelm
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('path')
+    parser.add_argument('output_path')
+    parser.add_argument('test', type=float, default=0.1)
+    args = parser.parse_args()
+
+    letters = load_letters(bpath=args.path)
+    J, W = split(filter_letters(letters, min_len=0))
+    random.shuffle(J), random.shuffle(W)
+    J_split, W_split = int(len(J) * (1 - args.test)), int(len(W) * (1 - args.test))
+    train_letters = J[:J_split] + W[:W_split]
+    test_letters = J[]
