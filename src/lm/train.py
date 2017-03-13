@@ -28,6 +28,10 @@ def letters2lines(letters):
     return [list(line) for letter in letters for line in letter.lines]
 
 
+def lines2chars(lines):
+    return [c for line in lines for c in line]
+
+
 def train_model_fork(
         model, train, valid, test, optim, epochs, criterion,
         gpu=False, early_stop=3, checkpoint=50, hook=10):
@@ -104,27 +108,24 @@ if __name__ == '__main__':
         J, W = load_files()
         J, W = letters2lines(J), letters2lines(W)
         d.fit(J, W)
-        lines = {'J': [c for l in J for c in l],
-                 'W': [c for l in W for c in l]}
-        data = BlockDataset(
-            lines, d, args.batch_size, args.bptt, gpu=args.gpu)
-        train, test, valid = data.splits(dev=0.1)
+        train, test, valid = BlockDataset(
+            {'J': lines2chars(J), 'W': lines2chars(W)},
+            d, args.batch_size, args.bptt, gpu=args.gpu
+        ).splits(dev=0.1)
     else:                       # fetch already splitted datasets
         train_J, train_W = load_files(subset='train/', start_from_line=0)
-        test_J, test_W = load_files(subset='test/', start_from_line=0)
         train_J, train_W = letters2lines(train_J), letters2lines(train_W)
+        test_J, test_W = load_files(subset='test/', start_from_line=0)
         test_J, test_W = letters2lines(test_J), letters2lines(test_W)
         d.fit(train_J, train_W)
-        train_lines = {'J': [c for l in train_J for c in l],
-                       'W': [c for l in train_W for c in l]}
-        test_lines = {'J': [c for l in test_J for c in l],
-                      'W': [c for l in test_W for c in l]}
         test = BlockDataset(
-            test_lines, d, args.batch_size, args.bptt, gpu=args.gpu,
-            evaluation=True)
-        train = BlockDataset(
-            train_lines, d, args.batch_size, args.bptt, gpu=args.gpu)
-        train, valid = train.splits(0.15, dev=None)
+            {'J': lines2chars(test_J), 'W': lines2chars(test_W)},
+            d, args.batch_size, args.bptt,
+            gpu=args.gpu, evaluation=True)
+        train, valid = BlockDataset(
+            {'J': lines2chars(train_J), 'W': lines2chars(train_W)},
+            d, args.batch_size, args.bptt, gpu=args.gpu
+        ).splits(test=0.2, dev=None)
 
     print(' * vocabulary size. %d' % len(d))
 
@@ -146,6 +147,7 @@ if __name__ == '__main__':
         len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
 
     model.apply(u.Initializer.make_initializer())
+
     print(model)
 
     optim = Optimizer(

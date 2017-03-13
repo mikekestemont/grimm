@@ -325,6 +325,8 @@ def train_model(model, train, valid, test, optim, epochs, criterion,
         model.train()
 
     print(" * number of train batches. %d" % len(train))
+    print(" * number of test batches. %d" % len(test))
+    print(" * number of valid batches. %d" % len(valid))
     print(" * number of parameters. %d" % model.n_params())
 
     for epoch in range(1, epochs + 1):

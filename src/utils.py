@@ -86,7 +86,8 @@ def plot_confusion_matrix(cm, target_names,
     plt.xlabel('Predicted label')
 
 
-def save_letters(letters, target_dir='clean/', use_original_fname=False):
+def save_letters(letters, target_dir='clean/',
+                 use_original_fname=False, normalize_whitespace=True):
     try:
         shutil.rmtree(target_dir)
     except:
@@ -99,7 +100,10 @@ def save_letters(letters, target_dir='clean/', use_original_fname=False):
         else:
             fn = '-'.join([l.year, l.month, l.day]) + '_' + \
                  l.author + '-'.join([l.id1, l.id2]) + '.txt'
-        text = ' '.join(l.words)
+        if normalize_whitespace:
+            text = ' '.join(l.words)
+        else:
+            text = '\n'.join(l.lines)
         with open(target_dir + fn, 'w') as f:
             f.write(text)
 
@@ -126,7 +130,7 @@ if __name__ == '__main__':
     W_split = int(len(W) * (1 - args.test))
     train_dir = os.path.join(args.output_path, 'dataset/train/')
     test_dir = os.path.join(args.output_path, 'dataset/test/')
-    save_letters(J[:J_split] + W[:W_split],
-                 target_dir=train_dir, use_original_fname=True)
-    save_letters(J[J_split:] + W[W_split:],
-                 target_dir=test_dir, use_original_fname=True)
+    save_letters(J[:J_split] + W[:W_split], target_dir=train_dir,
+                 normalize_whitespace=False, use_original_fname=True)
+    save_letters(J[J_split:] + W[W_split:], target_dir=test_dir,
+                 normalize_whitespace=False, use_original_fname=True)
