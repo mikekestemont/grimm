@@ -404,19 +404,19 @@ class LMContainer(object):
             save_fn, ext = torch.save, 'pt'
         elif mode == 'pickle':
             import pickle as p
-            save_fn, ext = p.save, 'pickle'
+            save_fn, ext = p.dump, 'pickle'
         else:
             raise ValueError("Unknown mode [%s]" % mode)
         if isinstance(self.models, dict):
             # forkable models
             for head, model in self.models.items():
                 with open(prefix + '_' + head + '.' + ext, 'wb') as f:
-                    save_fn(f, model)
+                    save_fn(model, f)
         else:
             with open(prefix + '.' + ext, 'wb') as f:
-                save_fn(f, self.models)
+                save_fn(self.models, f)
         with open(prefix + '.dict.' + ext, 'wb') as f:
-            save_fn(f, self.d)
+            save_fn(self.d, f)
 
     @classmethod
     def from_disk(cls, model_path, d_path):

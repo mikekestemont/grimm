@@ -124,7 +124,7 @@ if __name__ == '__main__':
             evaluation=True)
         train = BlockDataset(
             train_lines, d, args.batch_size, args.bptt, gpu=args.gpu)
-        train, valid = train.splits(dev=None)
+        train, valid = train.splits(0.15, dev=None)
 
     print(' * vocabulary size. %d' % len(d))
 
@@ -154,17 +154,16 @@ if __name__ == '__main__':
         lr_decay=args.learning_rate_decay, start_decay_at=args.start_decay_at)
     criterion = nn.CrossEntropyLoss()
 
-    start = time.time()
-
     try:
+        start = time.time()
         trained_models, test_ppl = train_fn(
             model, train, valid, test, optim, args.epochs, criterion,
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint)
         if args.save:
             f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}.{ppl}'
-            fname = f.format(ppl=test_ppl, **vars(args))
-            print("Saving model...")
+            fname = f.format(ppl=int(test_ppl), **vars(args))
+            print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)
     except (EarlyStoppingException, KeyboardInterrupt) as e:
         test_ppl = math.exp(u.validate_model(model, test, criterion))
