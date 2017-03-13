@@ -132,12 +132,12 @@ class Dataset(object):
         case of e.g. monolingual data.
 
         Arguments:
-            src: list of lists of hashables representing source sequences
-            trg: list of lists of hashables representing target sequences
-            dicts: dict of {'src': src_dict, 'trg': trg_dict} where
-                src_dict: Dict instance fitted to the source data
-                trg_dict: Dict instance fitted to the target data
-            sort_key: function to sort src, trg example pairs
+        - src: list of lists of hashables representing source sequences
+        - trg: list of lists of hashables representing target sequences
+        - dicts: dict of {'src': src_dict, 'trg': trg_dict} where
+            src_dict: Dict instance fitted to the source data
+            trg_dict: Dict instance fitted to the target data
+        - sort_key: function to sort src, trg example pairs
         """
         self.src = src if fitted else list(dicts['src'].transform(src))
         self.trg = trg if fitted else list(dicts['trg'].transform(trg))
@@ -158,8 +158,8 @@ class Dataset(object):
         Returns a BatchIterator built from this dataset examples
 
         Parameters:
-            batch_size: Integer
-            kwargs: Parameters passed on to the BatchIterator constructor
+        - batch_size: Integer
+        - kwargs: Parameters passed on to the BatchIterator constructor
         """
         total_len = len(self.src)
         assert batch_size <= total_len, \
@@ -173,12 +173,13 @@ class Dataset(object):
         BatchIterator objects instead of Dataset via method chaining.
 
         Parameters:
-            dev: float less than 1 or None, dev set proportion
-            test: float less than 1 or None, test set proportion
-            shuffle: bool, whether to shuffle the datasets prior to splitting
-            batchify: bool, whether to return BatchIterator's instead
-            batch_size: int, only needed if batchify is True
-            kwargs: optional arguments passed to the BatchIterator constructor
+        ===========
+        - dev: float less than 1 or None, dev set proportion
+        - test: float less than 1 or None, test set proportion
+        - shuffle: bool, whether to shuffle the datasets prior to splitting
+        - batchify: bool, whether to return BatchIterator's instead
+        - batch_size: int, only needed if batchify is True
+        - kwargs: optional arguments passed to the BatchIterator constructor
         """
         if shuffle:
             src, trg = shuffle_pairs(self.src, self.trg)
@@ -239,6 +240,22 @@ class BatchIterator(object):
 
 
 class BlockDataset(object):
+    """
+    Dataset class for training LMs that also supports multi-source datasets.
+
+    Parameters:
+    ===========
+    - examples: list of sequences or dict of source to list of sequences,
+        Source data that will be used by the dataset.
+        If fitted is False, the lists are supposed to be already transformed
+        into a single long vector. If a dict, the examples are supposed to
+        come from different sources and will be iterated over cyclically.
+    - src_dict: Dict already fitted.
+    - batch_size: int,
+    - bptt: int,
+        Backpropagation through time (maximum context that the RNN should pay
+        attention to)
+    """
     def __init__(self, examples, src_dict, batch_size, bptt,
                  fitted=False, gpu=False, evaluation=False):
         if isinstance(examples, dict):
@@ -292,6 +309,18 @@ class BlockDataset(object):
         return length // self.bptt
 
     def splits(self, test=0.1, dev=0.1):
+        """
+        Computes splits according to test and dev proportions (whose sum can't
+        be higher than 1). In case of a multi-source dataset, the output is
+        respectively a dataset containing the partition for each source in the
+        same shape as the original (non-partitioned) dataset.
+
+        Returns:
+        ==========
+
+        tuple of BlockDataset's
+
+        """
         datasets, splits = [], get_splits(len(self) * self.bptt, test, dev=dev)
         for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
             evaluation = self.evaluation if idx == 0 else True
