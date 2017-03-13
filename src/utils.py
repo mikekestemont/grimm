@@ -19,17 +19,11 @@ def load_letters(bpath='../brothers-grimm-data/',
                  start_from_line=3):
     Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee', 'day',
                                    'month', 'year', 'words', 'lines', 'fn'])
-
     letters = []
-
     for fp in glob(bpath + subset + '*.txt'):
-
         bn = os.path.basename(fp)
-
         try:
-
             id1, id2, send, addr, d, m, y = bn.replace('.txt', '').split('_')
-
             with open(fp) as f:
                 lines = f.readlines()[start_from_line:]
                 no_comment = []
@@ -40,13 +34,10 @@ def load_letters(bpath='../brothers-grimm-data/',
                         break
                     else:
                         no_comment.append(line)
-
                 words = ' '.join(no_comment).lower().split()
-
             letter = Letter(
                 id1, id2, send, addr, d, m, y, words, no_comment, bn)
             letters.append(letter)
-
         except:
             print('parsing error:', bn)
 
@@ -56,18 +47,13 @@ def load_letters(bpath='../brothers-grimm-data/',
 def load_tales(bpath='../brothers-grimm-data/FairyTales/', year=None):
     Tale = namedtuple('tale', ['title', 'year', 'words'])
     tales = []
-
     if year:
-
         for fp in glob(bpath + 'Grimm-'+str(year)+'/*.txt'):
             title = os.path.basename(fp).replace('.txt', '')[5:]\
                         .replace('-', ' ')
-
             with open(fp) as f:
                 words = f.read().lower().split()
-
             tales.append(Tale(title, year, words))
-
     return tales
 
 
