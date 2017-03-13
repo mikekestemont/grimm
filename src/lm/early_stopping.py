@@ -1,6 +1,7 @@
 
 import heapq
 
+
 class EarlyStoppingException(Exception):
     def __init(self, message, data={}):
         super(EarlyStopping, self).__init__(message)

@@ -1,3 +1,4 @@
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -13,13 +14,15 @@ from collections import namedtuple, Counter
 import shutil
 
 
-def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
-    Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee',
-                                   'day', 'month', 'year', 'words', 'lines'])
+def load_letters(bpath='../brothers-grimm-data/',
+                 subset='SplittedOCROutputManuscripts/*/',
+                 start_from_line=3):
+    Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee', 'day',
+                                   'month', 'year', 'words', 'lines', 'fn'])
 
     letters = []
 
-    for fp in glob(bpath + 'SplittedOCROutputManuscripts/*/*.txt'):
+    for fp in glob(bpath + subset + '*.txt'):
 
         bn = os.path.basename(fp)
 
@@ -40,7 +43,8 @@ def load_letters(bpath='../brothers-grimm-data/', start_from_line=3):
 
                 words = ' '.join(no_comment).lower().split()
 
-            letter = Letter(id1, id2, send, addr, d, m, y, words, no_comment)
+            letter = Letter(
+                id1, id2, send, addr, d, m, y, words, no_comment, bn)
             letters.append(letter)
 
         except:
@@ -96,7 +100,7 @@ def plot_confusion_matrix(cm, target_names,
     plt.xlabel('Predicted label')
 
 
-def save_letters(letters, target_dir='clean/'):
+def save_letters(letters, target_dir='clean/', use_original_fname=False):
     try:
         shutil.rmtree(target_dir)
     except:
@@ -104,8 +108,11 @@ def save_letters(letters, target_dir='clean/'):
     os.mkdir(target_dir)
 
     for l in letters:
-        fn = '-'.join([l.year, l.month, l.day]) + '_' + \
-             l.author + '-'.join([l.id1, l.id2]) + '.txt'
+        if use_original_fname:
+            fn = l.fn
+        else:
+            fn = '-'.join([l.year, l.month, l.day]) + '_' + \
+                 l.author + '-'.join([l.id1, l.id2]) + '.txt'
         text = ' '.join(l.words)
         with open(target_dir + fn, 'w') as f:
             f.write(text)
@@ -122,14 +129,18 @@ def split(letters, test=0.1, dev=0.1):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('path')
-    parser.add_argument('output_path')
-    parser.add_argument('test', type=float, default=0.1)
+    parser.add_argument('--path', required=True)
+    parser.add_argument('--output_path', required=True)
+    parser.add_argument('--test', type=float, default=0.1)
     args = parser.parse_args()
 
     letters = load_letters(bpath=args.path)
     J, W = split(filter_letters(letters, min_len=0))
-    random.shuffle(J), random.shuffle(W)
-    J_split, W_split = int(len(J) * (1 - args.test)), int(len(W) * (1 - args.test))
-    train_letters = J[:J_split] + W[:W_split]
-    test_letters = J[]
+    J_split = int(len(J) * (1 - args.test))
+    W_split = int(len(W) * (1 - args.test))
+    train_dir = os.path.join(args.output_path, 'dataset/train/')
+    test_dir = os.path.join(args.output_path, 'dataset/test/')
+    save_letters(J[:J_split] + W[:W_split],
+                 target_dir=train_dir, use_original_fname=True)
+    save_letters(J[J_split:] + W[W_split:],
+                 target_dir=test_dir, use_original_fname=True)

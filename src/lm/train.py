@@ -60,6 +60,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', required=True)
+    parser.add_argument('--already_split', action='store_true')
     parser.add_argument('--training_mode', required=True)
     parser.add_argument('--max_size', default=1000000, type=int)
     parser.add_argument('--min_freq', default=1, type=int)
@@ -89,20 +90,41 @@ if __name__ == '__main__':
 
     print('Loading data...')
 
-    def load_files():
+    def load_files(**kwargs):
         sys.path.append('../')
         from src.utils import filter_letters, load_letters, split
-        letters = load_letters(bpath=os.path.expanduser(args.path))
+        bpath = os.path.expanduser(args.path)
+        letters = load_letters(bpath=bpath, **kwargs)
         return split(filter_letters(letters, min_len=0))
 
-    J, W = load_files()
-    J, W = letters2lines(J), letters2lines(W)
     d = Dict(max_size=args.max_size, min_freq=args.min_freq,
              bos_token=u.BOS, eos_token=u.EOS)
-    d.fit(J, W)
-    lines = {'J': [c for l in J for c in l], 'W': [c for l in W for c in l]}
-    data = BlockDataset(lines, d, args.batch_size, args.bptt, gpu=args.gpu)
-    train, test, valid = data.splits(dev=0.1)
+
+    if not args.already_split:  # fetch raw datasets computing splits
+        J, W = load_files()
+        J, W = letters2lines(J), letters2lines(W)
+        d.fit(J, W)
+        lines = {'J': [c for l in J for c in l],
+                 'W': [c for l in W for c in l]}
+        data = BlockDataset(
+            lines, d, args.batch_size, args.bptt, gpu=args.gpu)
+        train, test, valid = data.splits(dev=0.1)
+    else:                       # fetch already splitted datasets
+        train_J, train_W = load_files(subset='train/', start_from_line=0)
+        test_J, test_W = load_files(subset='test/', start_from_line=0)
+        train_J, train_W = letters2lines(train_J), letters2lines(train_W)
+        test_J, test_W = letters2lines(test_J), letters2lines(test_W)
+        d.fit(train_J, train_W)
+        train_lines = {'J': [c for l in train_J for c in l],
+                       'W': [c for l in train_W for c in l]}
+        test_lines = {'J': [c for l in test_J for c in l],
+                      'W': [c for l in test_W for c in l]}
+        test = BlockDataset(
+            test_lines, d, args.batch_size, args.bptt, gpu=args.gpu,
+            evaluation=True)
+        train = BlockDataset(
+            train_lines, d, args.batch_size, args.bptt, gpu=args.gpu)
+        train, valid = train.splits(dev=None)
 
     print(' * vocabulary size. %d' % len(d))
 
@@ -120,7 +142,8 @@ if __name__ == '__main__':
     else:
         raise ValueError("Unknown training mode [%s]" % args.training_mode)
 
-    model = model_type(len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
+    model = model_type(
+        len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
 
     model.apply(u.Initializer.make_initializer())
     print(model)
@@ -135,8 +158,9 @@ if __name__ == '__main__':
 
     try:
         trained_models, test_ppl = train_fn(
-            model, train, valid, test, optim, args.epochs, criterion, gpu=args.gpu,
-            early_stop=args.early_stop, checkpoint=args.checkpoint, hook=args.hook)
+            model, train, valid, test, optim, args.epochs, criterion,
+            gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
+            checkpoint=args.checkpoint)
         if args.save:
             f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}.{ppl}'
             fname = f.format(ppl=test_ppl, **vars(args))
