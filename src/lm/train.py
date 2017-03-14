@@ -104,30 +104,31 @@ if __name__ == '__main__':
     d = Dict(max_size=args.max_size, min_freq=args.min_freq,
              bos_token=u.BOS, eos_token=u.EOS)
 
-    if not args.already_split:  # fetch raw datasets computing splits
-        J, W = load_files()
-        J, W = letters2lines(J), letters2lines(W)
-        d.fit(J, W)
-        train, test, valid = BlockDataset(
-            {'J': lines2chars(J), 'W': lines2chars(W)},
-            d, args.batch_size, args.bptt, gpu=args.gpu
-        ).splits(dev=0.1)
-    else:                       # fetch already splitted datasets
+    if args.already_split:      # fetch already splitted datasets
         train_J, train_W = load_files(subset='train/', start_from_line=0)
         train_J, train_W = letters2lines(train_J), letters2lines(train_W)
         test_J, test_W = load_files(subset='test/', start_from_line=0)
         test_J, test_W = letters2lines(test_J), letters2lines(test_W)
         d.fit(train_J, train_W)
         test = BlockDataset(
-            {'J': lines2chars(test_J), 'W': lines2chars(test_W)},
-            d, args.batch_size, args.bptt,
+            {'J': test_J, 'W': test_W}, d, args.batch_size, args.bptt,
             gpu=args.gpu, evaluation=True)
         train, valid = BlockDataset(
-            {'J': lines2chars(train_J), 'W': lines2chars(train_W)},
-            d, args.batch_size, args.bptt, gpu=args.gpu
-        ).splits(test=0.2, dev=None)
+            {'J': train_J, 'W': train_W}, d, args.batch_size, args.bptt,
+            gpu=args.gpu).splits(test=0.1, dev=None)
+    else:                       # fetch raw datasets computing splits
+        J, W = load_files()
+        J, W = letters2lines(J), letters2lines(W)
+        d.fit(J, W)
+        train, test, valid = BlockDataset(
+            {'J': J, 'W': W}, d, args.batch_size, args.bptt,
+            gpu=args.gpu).splits(dev=0.1)
 
     print(' * vocabulary size. %d' % len(d))
+
+    print(" * number of train batches. %d" % (len(train) * args.bptt))
+    print(" * number of test batches. %d" % (len(test) * args.bptt))
+    print(" * number of valid batches. %d" % (len(valid) * args.bptt))
 
     print('Building model...')
 
@@ -149,6 +150,7 @@ if __name__ == '__main__':
     model.apply(u.Initializer.make_initializer())
 
     print(model)
+    print(" * number of model parameters. %d" % model.n_params())
 
     optim = Optimizer(
         model.parameters(), args.optim,
@@ -163,7 +165,7 @@ if __name__ == '__main__':
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint)
         if args.save:
-            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}.{ppl}'
+            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{ppl}p.{bptt}b'
             fname = f.format(ppl=int(test_ppl), **vars(args))
             print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)

@@ -42,7 +42,8 @@ def batchify(examples, pad_token=None, align_right=False):
 
 
 def block_batchify(vector, batch_size):
-    vector = torch.LongTensor(vector)
+    if isinstance(vector, list):
+        vector = torch.LongTensor(vector)
     num_batches = len(vector) // batch_size
     batches = vector.narrow(0, 0, num_batches * batch_size)
     batches = batches.view(batch_size, -1).t().contiguous()
@@ -260,16 +261,16 @@ class BlockDataset(object):
                  fitted=False, gpu=False, evaluation=False):
         if isinstance(examples, dict):
             self.data = {}
-            for name, subdata in examples.items():
-                if fitted:
-                    self.data[name] = subdata
-                else:
-                    self.data[name] = list(src_dict.transform(subdata))
-                self.data[name] = block_batchify(self.data[name], batch_size)
+            for name, data in examples.items():
+                if not fitted:      # subdata is already an integer vector
+                    data = [c for l in src_dict.transform(data) for c in l]
+                self.data[name] = block_batchify(data, batch_size)
             self.names = list(self.data.keys())
         else:
-            data = examples if fitted else list(src_dict.transform(examples))
-            self.data = block_batchify(data, batch_size)
+            if not fitted:
+                examples = \
+                    [c for l in src_dict.transform(examples) for c in l]
+            self.data = block_batchify(examples, batch_size)
 
         self.src_dict = src_dict
         self.batch_size = batch_size
@@ -279,6 +280,9 @@ class BlockDataset(object):
         self.evaluation = evaluation
 
     def _next_item(self, idx):
+        """
+        Selects next dataset in case of multiple datasets in a cyclical way.
+        """
         idx, dataset = divmod(idx, len(self.data))
         name = self.names[dataset]
         data = self.data[name]
@@ -302,11 +306,15 @@ class BlockDataset(object):
             return src, trg
 
     def __len__(self):
+        """
+        The length of the dataset is computed as the number of bptt'ed batches
+        to conform the way batches are computed. See __getitem__.
+        """
         if isinstance(self.data, dict):
-            length = min(len(d) for d in self.data.values()) * len(self.data)
+            num_batches = min(len(d) for d in self.data.values()) * len(self.data)
         else:
-            length = len(self.data)
-        return length // self.bptt
+            num_batches = len(self.data)
+        return num_batches // self.bptt
 
     def splits(self, test=0.1, dev=0.1):
         """
@@ -319,17 +327,16 @@ class BlockDataset(object):
         ==========
 
         tuple of BlockDataset's
-
         """
-        datasets, splits = [], get_splits(len(self) * self.bptt, test, dev=dev)
+        n_element = len(self) * self.bptt * self.batch_size  # min num elements
+        datasets, splits = [], get_splits(n_element, test, dev=dev)
         for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
             evaluation = self.evaluation if idx == 0 else True
             if isinstance(self.data, dict):
-                start = start // len(self.data)
-                stop = stop // len(self.data)
+                start, stop = start // len(self.data), stop // len(self.data)
                 dataset = {}
                 for name, data in self.data.items():
-                    dataset[name] = data[start:stop]
+                    dataset[name] = data.t().contiguous().view(-1)[start:stop]
                 datasets.append(BlockDataset(
                     dataset, self.src_dict, self.batch_size, self.bptt,
                     fitted=True, gpu=self.gpu, evaluation=evaluation))
@@ -339,3 +346,4 @@ class BlockDataset(object):
                     self.bptt, fitted=True, gpu=self.gpu,
                     evaluation=evaluation))
         return tuple(datasets)
+

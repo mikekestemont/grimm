@@ -17,8 +17,9 @@ import shutil
 def load_letters(bpath='../brothers-grimm-data/',
                  subset='SplittedOCROutputManuscripts/*/',
                  start_from_line=3):
-    Letter = namedtuple('letter', ['id1', 'id2', 'author', 'addressee', 'day',
-                                   'month', 'year', 'words', 'lines', 'fn'])
+    Letter = namedtuple('letter',
+                        ['id1', 'id2', 'author', 'addressee', 'day',
+                         'month', 'year', 'words', 'lines', 'fn', 'abspath'])
     letters = []
     for fp in glob(bpath + subset + '*.txt'):
         bn = os.path.basename(fp)
@@ -36,7 +37,7 @@ def load_letters(bpath='../brothers-grimm-data/',
                         no_comment.append(line)
                 words = ' '.join(no_comment).lower().split()
             letter = Letter(
-                id1, id2, send, addr, d, m, y, words, no_comment, bn)
+                id1, id2, send, addr, d, m, y, words, no_comment, bn, fp)
             letters.append(letter)
         except:
             print('parsing error:', bn)
@@ -111,9 +112,15 @@ def save_letters(letters, target_dir='clean/',
 def split(letters, test=0.1, dev=0.1):
     random.shuffle(letters)
     jacob, wilhelm = [], []
+    pred = {'Jacob-Grimm': 0, 'Wilhelm-Grimm': 1}
     for l in letters:
-        (jacob, wilhelm)[l.author == 'Jacob-Grimm'].append(l)
+        (jacob, wilhelm)[pred[l.author]].append(l)
     return jacob, wilhelm
+
+
+def move_letters(letters, source_dir, target_dir):
+    for l in letters:
+        shutil.copyfile(l.abspath, os.path.join(target_dir, l.fn))
 
 
 if __name__ == '__main__':
@@ -122,10 +129,16 @@ if __name__ == '__main__':
     parser.add_argument('--path', required=True)
     parser.add_argument('--output_path', required=True)
     parser.add_argument('--test', type=float, default=0.1)
+    parser.add_argument('--save_all', action='store_true')
     args = parser.parse_args()
 
     letters = load_letters(bpath=args.path)
     J, W = split(filter_letters(letters, min_len=0))
+    if args.save_all:
+        all_dir = os.path.join(args.output_path, 'dataset/all/')
+        save_letters(J + W, target_dir=all_dir,
+                     use_original_fname=True,
+                     normalize_whitespace=False)
     J_split = int(len(J) * (1 - args.test))
     W_split = int(len(W) * (1 - args.test))
     train_dir = os.path.join(args.output_path, 'dataset/train/')
