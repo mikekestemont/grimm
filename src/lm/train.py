@@ -28,10 +28,6 @@ def letters2lines(letters):
     return [list(line) for letter in letters for line in letter.lines]
 
 
-def lines2chars(lines):
-    return [c for line in lines for c in line]
-
-
 def train_model_fork(
         model, train, valid, test, optim, epochs, criterion,
         gpu=False, early_stop=3, checkpoint=50, hook=10):

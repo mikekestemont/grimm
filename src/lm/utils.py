@@ -273,7 +273,7 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
     epoch_loss, batch_loss, report_words, hidden = 0, 0, 0, None
     start = time.time()
 
-    for b, i in enumerate(range(0, len(data) - 1)):
+    for i in range(0, len(data) - 1):
         model.zero_grad()
         source, targets, *head = data[i]
         if len(head) > 0:
@@ -290,16 +290,16 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
         batch_loss += loss.data[0]
         report_words += targets.nelement()
 
-        if b % checkpoint == 0 and b > 0:
+        if i % checkpoint == 0 and i > 0:
             print("Epoch %d, %5d/%5d batches; ppl: %6.2f; %3.0f tokens/s" %
-                  (epoch, b, len(data), math.exp(batch_loss / checkpoint),
+                  (epoch, i, len(data), math.exp(batch_loss / checkpoint),
                    report_words / (time.time() - start)))
             report_words = batch_loss = 0
             start = time.time()
             # call thunk every `hook` checkpoints
-            if hook and (b // checkpoint) % hook == 0:
+            if hook and (i // checkpoint) % hook == 0:
                 if on_hook is not None:
-                    on_hook(b // checkpoint)
+                    on_hook(i // checkpoint)
     return epoch_loss / (len(data) * data.bptt)
 
 
