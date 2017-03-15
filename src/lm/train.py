@@ -101,17 +101,17 @@ if __name__ == '__main__':
         test_J, test_W = load_files(subset='test/', start_from_line=0)
         test_J, test_W = letters2lines(test_J), letters2lines(test_W)
         d.fit(train_J, train_W)
-        test = BlockDataset(
+        test = CyclicBlockDataset(
             {'J': test_J, 'W': test_W}, d, args.batch_size, args.bptt,
             gpu=args.gpu, evaluation=True)
-        train, valid = BlockDataset(
+        train, valid = CyclicBlockDataset(
             {'J': train_J, 'W': train_W}, d, args.batch_size, args.bptt,
             gpu=args.gpu).splits(test=0.1, dev=None)
     else:                       # fetch raw datasets computing splits
         J, W = load_files()
         J, W = letters2lines(J), letters2lines(W)
         d.fit(J, W)
-        train, test, valid = BlockDataset(
+        train, test, valid = CyclicBlockDataset(
             {'J': J, 'W': W}, d, args.batch_size, args.bptt,
             gpu=args.gpu).splits(dev=0.1)
 

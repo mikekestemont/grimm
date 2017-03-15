@@ -252,14 +252,16 @@ def repackage_hidden(h):
 def validate_model(model, data, criterion, subset=None, reset_hidden=False):
     loss, hidden = 0, None
     for i in range(0, len(data) - 1):
-        source, targets, *head = data[i]
-        if len(head) > 0:
-            if subset is not None and subset != head[0]:
+        if isinstance(data, CyclicBlockDataset):
+            source, targets, head = data[i]
+            if subset is not None and subset != head:
                 continue
-            output, hidden = model(source, hidden=hidden, head=head[0])
+            output, hidden = model(source, hidden=hidden, head=head)
         else:
+            source, targets = data[i]
             output, hidden = model(source, hidden=hidden)
             # since loss is averaged across observations for each minibatch
+        output = output.view(-1, output.size(2))
         loss += len(source) * criterion(output, targets).data[0]
         if reset_hidden:
             hidden.data.zero_()
@@ -277,13 +279,15 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
 
     for i in range(0, len(data) - 1):
         model.zero_grad()
-        source, targets, *head = data[i]
-        if len(head) > 0:
-            if subset is not None and subset != head[0]:
+        if isinstance(data, CyclicBlockDataset):
+            source, targets, head = data[i]
+            if subset is not None and subset != head:
                 continue
-            output, hidden = model(source, hidden=hidden, head=head[0])
+            output, hidden = model(source, hidden=hidden, head=head)
         else:
+            source, targets = data[i]
             output, hidden = model(source, hidden=hidden)
+        output = output.view(-1, output.size(2))
         loss = criterion(output, targets)
         if reset_hidden:
             hidden.data.zero_()

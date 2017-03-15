@@ -106,6 +106,8 @@ class Dict(object):
                 self.counter.update(example if self.sequential else [example])
 
     def fit(self, *args):
+        if self.fitted:
+            raise ValueError('Dict is already fitted')
         self.partial_fit(*args)
         most_common = self.counter.most_common(self.max_size)
         self.vocab += [k for k, v in most_common if v >= self.min_freq]
@@ -124,8 +126,54 @@ class Dict(object):
             yield example
 
 
+class BatchIterator(object):
+    """
+    BatchIterator, a class to batchify PairedDataset's
+    """
+    def __init__(self, dataset, batch_size,
+                 gpu=False, align_right=False, evaluation=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.gpu = gpu
+        self.evaluation = evaluation
+        self.align_right = align_right
+        self.num_batches = len(dataset) // batch_size
+
+    def _batchify(self, batch_data, pad_token):
+        out = batchify(batch_data, pad_token, align_right=self.align_right)
+        if self.gpu:
+            out = out.cuda()
+        return Variable(out, volatile=self.evaluation)
+
+    def __getitem__(self, idx):
+        assert idx < self.num_batches, "%d >= %d" % (idx, self.num_batches)
+        batch_from = idx * self.batch_size
+        batch_to = (idx+1) * self.batch_size
+        src_pad = self.dataset.d['src'].get_pad()
+        trg_pad = self.dataset.d['trg'].get_pad()
+        src_batch = self._batchify(
+            self.dataset.data['src'][batch_from: batch_to], src_pad)
+        trg_batch = self._batchify(
+            self.dataset.data['trg'][batch_from: batch_to], trg_pad)
+        return src_batch, trg_batch
+
+    def __len__(self):
+        return self.num_batches
+
+
 class Dataset(object):
-    def __init__(self, src, trg, dicts, fitted=False):
+    @classmethod
+    def from_disk(cls, path):
+        with open(path, 'rb') as f:
+            return torch.load(f)
+
+    def to_disk(self, path):
+        with open(path, 'wb') as f:
+            torch.save(self, f)
+
+
+class PairedDataset(Dataset):
+    def __init__(self, src, trg, d, fitted=False):
         """
         Constructs a dataset out of source and target pairs. Examples will
         be transformed into integers according to their respective Dict.
@@ -135,23 +183,25 @@ class Dataset(object):
         Arguments:
         - src: list of lists of hashables representing source sequences
         - trg: list of lists of hashables representing target sequences
-        - dicts: dict of {'src': src_dict, 'trg': trg_dict} where
+        - d: dict of {'src': src_dict, 'trg': trg_dict} where
             src_dict: Dict instance fitted to the source data
             trg_dict: Dict instance fitted to the target data
-        - sort_key: function to sort src, trg example pairs
         """
-        self.src = src if fitted else list(dicts['src'].transform(src))
-        self.trg = trg if fitted else list(dicts['trg'].transform(trg))
+        self.data = {
+            'src': src if fitted else list(d['src'].transform(src)),
+            'trg': trg if fitted else list(d['trg'].transform(trg))}
         assert len(src) == len(trg), \
             "Source and Target dataset must be equal length"
-        self.dicts = dicts      # fitted dicts
+        self.d = d              # fitted dicts
 
     def __len__(self):
-        return len(self.src)
+        return len(self.data['src'])
 
     def sort_(self, sort_key=None):
-        src, trg = zip(*sorted(zip(self.src, self.trg), key=sort_key))
-        self.src, self.trg = src, trg
+        sort = sorted(zip(self.data['src'], self.data['trg']), key=sort_key)
+        src, trg = zip(*sort)
+        self.data['src'] = src,
+        self.data['trg'] = trg
         return self
 
     def batches(self, batch_size, **kwargs):
@@ -160,9 +210,8 @@ class Dataset(object):
 
         Parameters:
         - batch_size: Integer
-        - kwargs: Parameters passed on to the BatchIterator constructor
         """
-        total_len = len(self.src)
+        total_len = len(self)
         assert batch_size <= total_len, \
             "Batch size larger than data [%d > %d]" % (batch_size, total_len)
         return BatchIterator(self, batch_size, **kwargs)
@@ -180,67 +229,23 @@ class Dataset(object):
         - shuffle: bool, whether to shuffle the datasets prior to splitting
         - batchify: bool, whether to return BatchIterator's instead
         - batch_size: int, only needed if batchify is True
-        - kwargs: optional arguments passed to the BatchIterator constructor
         """
         if shuffle:
-            src, trg = shuffle_pairs(self.src, self.trg)
+            src, trg = shuffle_pairs(self.data['src'], self.data['trg'])
         else:
-            src, trg = self.src, self.trg
-        splits = get_splits(len(src), test, dev=dev)
-        datasets = [Dataset(src[i:j], trg[i:j], self.dicts, fitted=True)
-                    .sort_(sort_key) for i, j in zip(splits, splits[1:])]
+            src, trg = self.data['src'], self.data['trg']
+        splits, datasets = get_splits(len(src), test, dev=dev), []
+        for i, j in zip(splits, splits[1:]):
+            subset = PairedDataset(
+                src[i:j], trg[i:j], self.d, fitted=True).sort_(sort_key)
+            datasets.append(subset)
         if batchify:
             return tuple([s.batches(batch_size, **kwargs) for s in datasets])
         else:
             return datasets
 
-    @classmethod
-    def from_disk(cls, path):
-        data = torch.load(path)
-        src, trg, dicts = data['src'], data['trg'], data['dicts']
-        return cls(src, trg, dicts, fitted=True)
 
-    def to_disk(self, path):
-        data = {'src': self.src, 'trg': self.trg, 'dicts': self.dicts}
-        torch.save(data, path)
-
-
-class BatchIterator(object):
-    def __init__(self, dataset, batch_size,
-                 gpu=False, align_right=False, evaluation=False):
-        """
-        BatchIterator
-        """
-        self.dataset = dataset
-        self.src = dataset.src
-        self.trg = dataset.trg
-        self.batch_size = batch_size
-        self.gpu = gpu
-        self.align_right = align_right
-        self.evaluation = evaluation
-        self.num_batches = len(dataset) // batch_size
-
-    def _batchify(self, batch_data, pad_token):
-        out = batchify(batch_data, pad_token, align_right=self.align_right)
-        if self.gpu:
-            out = out.cuda()
-        return Variable(out, volatile=self.evaluation)
-
-    def __getitem__(self, idx):
-        assert idx < self.num_batches, "%d >= %d" % (idx, self.num_batches)
-        batch_from = idx * self.batch_size
-        batch_to = (idx+1) * self.batch_size
-        src_pad = self.dataset.dicts['src'].get_pad()
-        trg_pad = self.dataset.dicts['trg'].get_pad()
-        src_batch = self._batchify(self.src[batch_from: batch_to], src_pad)
-        trg_batch = self._batchify(self.trg[batch_from: batch_to], trg_pad)
-        return src_batch, trg_batch
-
-    def __len__(self):
-        return self.num_batches
-
-
-class BlockDataset(object):
+class BlockDataset(Dataset):
     """
     Dataset class for training LMs that also supports multi-source datasets.
 
@@ -251,48 +256,40 @@ class BlockDataset(object):
         If fitted is False, the lists are supposed to be already transformed
         into a single long vector. If a dict, the examples are supposed to
         come from different sources and will be iterated over cyclically.
-    - src_dict: Dict already fitted.
+    - d: Dict already fitted.
     - batch_size: int,
     - bptt: int,
         Backpropagation through time (maximum context that the RNN should pay
         attention to)
     """
-    def __init__(self, examples, src_dict, batch_size, bptt,
+    def __init__(self, examples, d, batch_size, bptt,
                  fitted=False, gpu=False, evaluation=False):
-        if isinstance(examples, dict):
-            self.data = {}
-            for name, data in examples.items():
-                if not fitted:      # subdata is already an integer vector
-                    data = [c for l in src_dict.transform(data) for c in l]
-                self.data[name] = block_batchify(data, batch_size)
-            self.names = list(self.data.keys())
-        else:
-            if not fitted:
-                examples = \
-                    [c for l in src_dict.transform(examples) for c in l]
-            self.data = block_batchify(examples, batch_size)
+        if not fitted:
+            examples = [c for l in d.transform(examples) for c in l]
+        self.data = block_batchify(examples, batch_size)
+        if len(examples) == 0:
+            raise ValueError("Empty dataset")
 
-        self.src_dict = src_dict
+        self.d = d
         self.batch_size = batch_size
         self.bptt = bptt
         self.fitted = fitted
         self.gpu = gpu
         self.evaluation = evaluation
 
-    def _next_item(self, idx):
+    def __len__(self):
         """
-        Selects next dataset in case of multiple datasets in a cyclical way.
+        The length of the dataset is computed as the number of bptt'ed batches
+        to conform the way batches are computed. See __getitem__.
         """
-        idx, dataset = divmod(idx, len(self.data))
-        name = self.names[dataset]
-        data = self.data[name]
-        return idx, name, data
+        return len(self.data) // self.bptt
 
-    def __getitem__(self, idx):
-        if isinstance(self.data, dict):
-            idx, name, data = self._next_item(idx)
-        else:
-            data = self.data
+    def _getitem(self, data, idx):
+        """
+        General function to get the source data to compute the batch. This
+        should be overwritten by subclasses in which the source data isn't
+        always stored in self.data, e.g. the case of cyclical subset access.
+        """
         idx *= self.bptt
         seq_len = min(self.bptt, len(data) - 1 - idx)
         src = Variable(data[idx:idx+seq_len], volatile=self.evaluation)
@@ -300,21 +297,25 @@ class BlockDataset(object):
                        volatile=self.evaluation)
         if self.gpu:
             src, trg = src.cuda(), trg.cuda()
-        if isinstance(self.data, dict):
-            return src, trg, name
-        else:
-            return src, trg
+        return src, trg
 
-    def __len__(self):
+    def __getitem__(self, idx):
         """
-        The length of the dataset is computed as the number of bptt'ed batches
-        to conform the way batches are computed. See __getitem__.
+        Item getter for batch number idx.
+
+        Returns:
+        ========
+        - src: torch.LongTensor of maximum size of self.bptt x self.batch_size
+        - trg: torch.LongTensor of maximum size of self.bptt x self.batch_size,
+            corresponding to a shifted batch
         """
-        if isinstance(self.data, dict):
-            num_batches = min(len(d) for d in self.data.values()) * len(self.data)
-        else:
-            num_batches = len(self.data)
-        return num_batches // self.bptt
+        return self._getitem(self.data, idx)
+
+    def split_data(self, start, stop):
+        """
+        Compute a split on the dataset for a batch range defined by start, stop
+        """
+        return self.data.t().contiguous().view(-1)[start:stop]
 
     def splits(self, test=0.1, dev=0.1):
         """
@@ -324,7 +325,7 @@ class BlockDataset(object):
         same shape as the original (non-partitioned) dataset.
 
         Returns:
-        ==========
+        ========
 
         tuple of BlockDataset's
         """
@@ -332,18 +333,52 @@ class BlockDataset(object):
         datasets, splits = [], get_splits(n_element, test, dev=dev)
         for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
             evaluation = self.evaluation if idx == 0 else True
-            if isinstance(self.data, dict):
-                start, stop = start // len(self.data), stop // len(self.data)
-                dataset = {}
-                for name, data in self.data.items():
-                    dataset[name] = data.t().contiguous().view(-1)[start:stop]
-                datasets.append(BlockDataset(
-                    dataset, self.src_dict, self.batch_size, self.bptt,
-                    fitted=True, gpu=self.gpu, evaluation=evaluation))
-            else:
-                datasets.append(BlockDataset(
-                    self.data[start:stop], self.src_dict, self.batch_size,
-                    self.bptt, fitted=True, gpu=self.gpu,
-                    evaluation=evaluation))
+            split = self.split_data(start, stop)
+            datasets.append(type(self)(
+                split, self.d, self.batch_size, self.bptt,
+                fitted=True, gpu=self.gpu, evaluation=evaluation))
         return tuple(datasets)
 
+
+class CyclicBlockDataset(BlockDataset):
+    def __init__(self, examples, d, batch_size, bptt,
+                 fitted=False, gpu=False, evaluation=False):
+        self.data = {}
+        for name, data in examples.items():
+            if not fitted:      # subdata is already an integer vector
+                data = [c for l in d.transform(data) for c in l]
+            self.data[name] = block_batchify(data, batch_size)
+
+        self.names = list(self.data.keys())
+        self.d = d
+        self.batch_size = batch_size
+        self.bptt = bptt
+        self.fitted = fitted
+        self.gpu = gpu
+        self.evaluation = evaluation
+
+    def __len__(self):
+        batches = min(len(d) for d in self.data.values()) * len(self.data)
+        return batches // self.bptt
+
+    def __getitem__(self, idx):
+        """
+        Computes the subset for each batch in a cyclical way.
+
+        Returns:
+        ========
+        In addition to the standard BlockDataset, this subclass also returns
+        the name of the dataset in the current cycle in third position.
+        """
+        idx, dataset = divmod(idx, len(self.data))
+        name = self.names[dataset]
+        data = self.data[name]
+        src, trg = self._getitem(data, idx)
+        return src, trg, name
+
+    def split_data(self, start, stop):
+        start, stop = start // len(self.data), stop // len(self.data)
+        split = {}
+        for name, data in self.data.items():
+            split[name] = data.t().contiguous().view(-1)[start:stop]
+        return split
