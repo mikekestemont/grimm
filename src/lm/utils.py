@@ -4,12 +4,14 @@ import math
 from collections import OrderedDict
 from itertools import groupby
 
-import numpy as np
 import torch
+import torch.nn.init as init
 from torch.autograd import Variable
 
-import utils as u
-from early_stopping import EarlyStopping, EarlyStoppingException
+from dataset import CyclicBlockDataset
+from early_stopping import EarlyStopping
+
+from torch import nn
 
 
 BOS = '<bos>'
@@ -108,12 +110,6 @@ def default_weight_init(m, init_range=0.05):
         p.data.uniform_(-init_range, init_range)
 
 
-def get_fans(weight):
-    fan_in = weight.size(1)
-    fan_out = weight.size(0)
-    return fan_in, fan_out
-
-
 def rnn_param_type(param):
     """
     Distinguish between bias and state weight params inside an RNN.
@@ -126,79 +122,38 @@ def rnn_param_type(param):
     raise ValueError("Unkown param shape of size [%d]" % param.size())
 
 
-class Initializer(object):
-    """
-    Stateless class grouping different initialization functions.
-    """
-    @staticmethod
-    def glorot_uniform(weight, gain=1.0):
-        fan_in, fan_out = get_fans(weight)
-        a = gain * np.sqrt(2. / (fan_in + fan_out))
-        weight.data.uniform_(-a, a)
-
-    @staticmethod
-    def glorot_normal(weight, gain=1.0):
-        fan_in, fan_out = get_fans(weight)
-        std = gain * np.sqrt(2. / (fan_in + fan_out))
-        weight.data.normal_(std=std)
-
-    @staticmethod
-    def constant(param, value=0.0):
-        param.data = param.data.zero_() + value
-
-    @staticmethod
-    def uniform(param, min_scale, max_scale):
-        assert max_scale >= min_scale, \
-            "Wrong scale [%d < %d]" % (max_scale, min_scale)
-        param.data.uniform_(min_scale, max_scale)
-
-    @staticmethod
-    def orthogonal(param, gain=1.0):
-        normal = np.random.standard_normal(size=param.size())
-        u, _, v = np.linalg.svd(normal, full_matrices=False)
-        if u.shape == param.data.numpy().shape:
-            param.data.copy_(torch.from_numpy(u))
-        else:
-            param.data.copy_(torch.from_numpy(v))
-        param.data.mul_(gain)
-
-    @classmethod
-    def make_initializer(
-            cls,
-            linear={'type': 'uniform',
-                    'args': {'min_scale': -0.05, 'max_scale': 0.05}},
-            rnn={'type': 'glorot_uniform', 'args': {'gain': 1.}},
-            rnn_bias={'type': 'constant', 'args': {'value': 0.}},
-            emb={'type': 'uniform',
-                 'args': {'min_scale': -0.05, 'max_scale': 0.05}},
-            default={'type': 'uniform',
-                     'args': {'min_scale': -0.05, 'max_scale': 0.05}}):
+def make_initializer(
+        linear={'type': 'uniform', 'args': {'a': -0.05, 'b': 0.05}},
+        rnn={'type': 'xavier_uniform', 'args': {'gain': 1.}},
+        rnn_bias={'type': 'constant', 'args': {'val': 0.}},
+        emb={'type': 'uniform', 'args': {'a': -0.05, 'b': 0.05}},
+        default={'type': 'uniform', 'args': {'a': -0.05, 'b': 0.05}}):
         """
         Creates an initializer function customizable on a layer basis.
         """
-        rnns = (
-            torch.nn.LSTM, torch.nn.GRU, torch.nn.LSTMCell, torch.nn.GRUCell)
+        rnns = (torch.nn.LSTM, torch.nn.GRU,
+                torch.nn.LSTMCell, torch.nn.GRUCell)
 
-        def init(m):
+        def initializer(m):
             if isinstance(m, (rnns)):  # RNNs
                 for p_type, ps in groupby(m.parameters(), rnn_param_type):
                     if p_type == 'weight':
                         for p in ps:
-                            getattr(cls, rnn['type'])(p, **rnn['args'])
+                            getattr(init, rnn['type'])(p, **rnn['args'])
                     else:       # bias
                         for p in ps:
-                            getattr(cls, rnn_bias['type'])(
+                            getattr(init, rnn_bias['type'])(
                                 p, **rnn_bias['args'])
-            elif isinstance(m, torch.nn.Linear):  # LINEAR
+            elif isinstance(m, torch.nn.Linear):  # linear
                 for param in m.parameters():
-                    getattr(cls, linear['type'])(param, **linear['args'])
-            elif isinstance(m, torch.nn.Embedding):  # EMBEDDING
+                    getattr(init, linear['type'])(param, **linear['args'])
+            elif isinstance(m, torch.nn.Embedding):  # embedding
                 for param in m.parameters():
-                    getattr(cls, emb['type'])(param, **emb['args'])
+                    getattr(init, emb['type'])(param, **emb['args'])
             else:               # default initializer
                 for param in m.parameters():
-                    cls.uniform(param, -0.05, 0.05)
-        return init
+                    getattr(init, 'uniform')(param, a=-0.05, b=0.05)
+        return initializer
 
 
 # Hooks

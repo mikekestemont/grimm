@@ -138,7 +138,7 @@ if __name__ == '__main__':
     model = model_type(
         len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
 
-    model.apply(u.Initializer.make_initializer())
+    model.apply(u.make_initializer())
 
     print(model)
     print(" * number of model parameters. %d" % model.n_params())

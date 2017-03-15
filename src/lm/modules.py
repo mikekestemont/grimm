@@ -103,33 +103,6 @@ class MaxOut(nn.Module):
         return out.squeeze(2)
 
 
-class TiedEmbedding(nn.Embedding):
-    """
-    Custom embeddings layer that takes an external weight parameter.
-    This is useful for tying the embedding weights with another layer,
-    typically the output vocabulary distribution (output embeddings).
-    See TiedLinear.
-    """
-    def __init__(self, num_embeddings, embedding_dim, weight, **kwargs):
-        super(TiedEmbedding, self).__init__(
-            num_embeddings, embedding_dim, **kwargs)
-        assert isinstance(weight, nn.parameter.Parameter)
-        self.weight = weight
-
-
-class TiedLinear(nn.Linear):
-    """
-    Custom linear layer that takes an external weight parameter.
-    This is useful for tying the linear weights with another layer,
-    typically the input vocabulary distribution (input embeddings).
-    See TiedEmbedding.
-    """
-    def __init__(self, in_features, out_features, weight, bias=True):
-        super(TiedLinear, self).__init__(in_features, out_features, bias=bias)
-        assert isinstance(weight, nn.parameter.Parameter)
-        self.weight = weight
-
-
 class LM(nn.Module):
     """
     Vanilla RNN-based language model.
@@ -172,28 +145,25 @@ class LM(nn.Module):
 
         super(LM, self).__init__()
         # input embeddings
-        weight = None
-        if tie_weights:
-            weight = nn.parameter.Parameter(torch.randn(vocab, emb_dim))
-            self.embeddings = TiedEmbedding(vocab, self.emb_dim, weight)
-        else:
-            self.embeddings = nn.Embedding(vocab, self.emb_dim)
+        self.embeddings = nn.Embedding(vocab, self.emb_dim)
         # rnn
         self.rnn = getattr(nn, cell)(
             self.emb_dim, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
         # output embeddings
-        if not tie_weights:
-            self.project = nn.Linear(self.hid_dim, vocab)
-        else:
+        if tie_weights:
             if self.emb_dim == self.hid_dim:
-                self.project = TiedLinear(self.hid_dim, vocab, weight)
+                self.project = nn.Linear(self.hid_dim, vocab)
+                self.project.weight = self.embeddings.weight
             else:
                 assert project_on_tied_weights, \
                     "Unequal tied layer dims but no projection layer"
+                project = nn.Linear(self.emb_dim, vocab)
+                project.weight = self.embeddings.weight
                 self.project = nn.Sequential(
-                    nn.Linear(self.hid_dim, self.emb_dim),
-                    TiedLinear(self.emb_dim, vocab, weight))
+                    nn.Linear(self.hid_dim, self.emb_dim), project)
+        else:
+            self.project = nn.Linear(self.hid_dim, vocab)
 
     def parameters(self):
         for p in super(LM, self).parameters():
