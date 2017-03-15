@@ -29,30 +29,24 @@ def letters2lines(letters):
 
 
 def train_model_fork(
-        model, train, valid, test, optim, epochs, criterion,
-        gpu=False, early_stop=3, checkpoint=50, hook=10):
+        model, train, valid, test, optim, epochs, criterion, **kwargs):
     print("Training main")
     test_ppl = u.train_model(
-        model, train, valid, test, optim, epochs, criterion,
-        gpu=gpu, checkpoint=checkpoint, hook=hook, early_stop=early_stop)
+        model, train, valid, test, optim, epochs, criterion, **kwargs)
     model_J, model_W = model.fork_model(), model.fork_model()
     for label, model in [('J', model_J), ('W', model_W)]:
         print("Training brother [%s]" % label)
         optim.set_params(model.parameters())
-        u.train_model(
-            model, train, valid, test, optim, epochs, criterion,
-            gpu=gpu, early_stop=early_stop, checkpoint=checkpoint,
-            hook=hook, head=label)
+        u.train_model(model, train, valid, test, optim, epochs, criterion,
+                      **kwargs)
     return {'J': model_J, 'W': model_W}, test_ppl
 
 
 def train_model_multihead(
-        model, train, valid, test, optim, epochs, criterion,
-        gpu=False, early_stop=3, checkpoint=50, hook=10):
+        model, train, valid, test, optim, epochs, criterion, **kwargs):
     print("Training main")
-    test_ppl = u.train_model(model, train, valid, test, optim, epochs, criterion,
-                  gpu=gpu, early_stop=early_stop, checkpoint=checkpoint,
-                  hook=hook)
+    test_ppl = u.train_model(
+        model, train, valid, test, optim, epochs, criterion, **kwargs)
     return model, test_ppl
 
 
@@ -73,6 +67,7 @@ if __name__ == '__main__':
     parser.add_argument('--project_on_tied_weights', action='store_true')
     parser.add_argument('--batch_size', default=200, type=int)
     parser.add_argument('--bptt', default=10, type=int)
+    parser.add_argument('--reset_hidden', action='store_true')
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--checkpoint', default=50, type=int)
     parser.add_argument('--hook', default=10, type=int,
@@ -159,7 +154,7 @@ if __name__ == '__main__':
         trained_models, test_ppl = train_fn(
             model, train, valid, test, optim, args.epochs, criterion,
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
-            checkpoint=args.checkpoint)
+            checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
         if args.save:
             f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{ppl}p.{bptt}b'
             fname = f.format(ppl=int(test_ppl), **vars(args))

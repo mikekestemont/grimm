@@ -249,7 +249,7 @@ def repackage_hidden(h):
         return tuple(repackage_hidden(v) for v in h)
 
 
-def validate_model(model, data, criterion, subset=None):
+def validate_model(model, data, criterion, subset=None, reset_hidden=False):
     loss, hidden = 0, None
     for i in range(0, len(data) - 1):
         source, targets, *head = data[i]
@@ -261,12 +261,14 @@ def validate_model(model, data, criterion, subset=None):
             output, hidden = model(source, hidden=hidden)
             # since loss is averaged across observations for each minibatch
         loss += len(source) * criterion(output, targets).data[0]
+        if reset_hidden:
+            hidden.data.zero_()
         hidden = repackage_hidden(hidden)
     return loss / (len(data) * data.bptt)
 
 
 def train_epoch(model, data, optim, criterion, epoch, checkpoint,
-                hook=0, on_hook=None, subset=None):
+                hook=0, on_hook=None, subset=None, reset_hidden=False):
     """
     hook: compute `on_hook` every `hook` checkpoints
     """
@@ -283,6 +285,8 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
         else:
             output, hidden = model(source, hidden=hidden)
         loss = criterion(output, targets)
+        if reset_hidden:
+            hidden.data.zero_()
         hidden = repackage_hidden(hidden)
         loss.backward(), optim.step()
         # since loss is averaged across observations for each minibatch
@@ -304,7 +308,8 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
 
 
 def train_model(model, train, valid, test, optim, epochs, criterion,
-                gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None):
+                gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None,
+                reset_hidden=False):
     if gpu:
         criterion.cuda(), model.cuda()
 
@@ -312,7 +317,8 @@ def train_model(model, train, valid, test, optim, epochs, criterion,
 
     def on_hook(checkpoint):
         model.eval()
-        valid_ppl = math.exp(validate_model(model, valid, criterion, subset=subset))
+        valid_ppl = math.exp(validate_model(
+            model, valid, criterion, subset=subset, reset_hidden=reset_hidden))
         # log checkpoint
         print("Valid perplexity: %g" % valid_ppl)
         # maybe decay lr
@@ -333,9 +339,11 @@ def train_model(model, train, valid, test, optim, epochs, criterion,
         print("Train perplexity: %g" % math.exp(min(train_loss, 100)))
         # val
         model.eval()
-        valid_loss = validate_model(model, valid, criterion, subset=subset)
+        valid_loss = validate_model(
+            model, valid, criterion, subset=subset, reset_hidden=reset_hidden)
         print("Valid perplexity: %g" % math.exp(min(valid_loss, 100)))
     # test
-    test_loss = validate_model(model, test, criterion, subset=subset)
+    test_loss = validate_model(
+        model, test, criterion, subset=subset, reset_hidden=reset_hidden)
     print("Test perplexity: %g" % math.exp(test_loss))
     return math.exp(test_loss)

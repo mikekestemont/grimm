@@ -254,9 +254,11 @@ class LM(nn.Module):
 
     def predict_proba(self, inp, gpu=False, **kwargs):
         self.eval()
-        logs, hidden = self(
-            Variable(torch.LongTensor([inp]), volatile=True), **kwargs)
-        return u.select_cols(logs, inp).sum()
+        inp_vec = Variable(torch.LongTensor([inp]), volatile=True)
+        if gpu:
+            inp_vec.cuda()
+        logs, hidden = self(inp_vec, **kwargs)
+        return u.select_cols(logs, inp).sum().data[0]
 
     def forward(self, inp, hidden=None, **kwargs):
         emb = self.embeddings(inp)
@@ -393,6 +395,14 @@ class LMContainer(object):
             self.get_head = lambda head: self.models
         else:
             raise ValueError("Wrong model type %s" % type(models))
+
+    def cuda(self):
+        for head in self.heads:
+            self.get_head(head).cuda()
+
+    def cpu(self):
+        for head in self.heads:
+            self.get_head(head).cpu()
 
     def predict_proba(self, text, author, gpu=False):
         inp = [c for l in self.d.transform(text) for c in l]
