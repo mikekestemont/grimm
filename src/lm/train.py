@@ -19,34 +19,30 @@ import torch.nn as nn
 
 from modules import ForkableLM, MultiheadLM, LMContainer
 from optimizer import Optimizer
-from dataset import Dict, BlockDataset
+from dataset import Dict, CyclicBlockDataset
 from early_stopping import EarlyStoppingException
 import utils as u
 
 
-def letters2lines(letters):
-    return [list(line) for letter in letters for line in letter.lines]
-
-
 def train_model_fork(
-        model, train, valid, test, optim, epochs, criterion, **kwargs):
+        model, train, valid, test, optim, epochs, criterion, d, **kwargs):
     print("Training main")
     test_ppl = u.train_model(
-        model, train, valid, test, optim, epochs, criterion, **kwargs)
+        model, train, valid, test, optim, epochs, criterion, d, **kwargs)
     model_J, model_W = model.fork_model(), model.fork_model()
     for label, model in [('J', model_J), ('W', model_W)]:
         print("Training brother [%s]" % label)
         optim.set_params(model.parameters())
-        u.train_model(model, train, valid, test, optim, epochs, criterion,
-                      **kwargs)
+        u.train_model(
+            model, train, valid, test, optim, epochs, criterion, d, **kwargs)
     return {'J': model_J, 'W': model_W}, test_ppl
 
 
 def train_model_multihead(
-        model, train, valid, test, optim, epochs, criterion, **kwargs):
+        model, train, valid, test, optim, epochs, criterion, d, **kwargs):
     print("Training main")
     test_ppl = u.train_model(
-        model, train, valid, test, optim, epochs, criterion, **kwargs)
+        model, train, valid, test, optim, epochs, criterion, d, **kwargs)
     return model, test_ppl
 
 
@@ -152,11 +148,11 @@ if __name__ == '__main__':
     try:
         start = time.time()
         trained_models, test_ppl = train_fn(
-            model, train, valid, test, optim, args.epochs, criterion,
+            model, train, valid, test, optim, args.epochs, criterion, d,
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
         if args.save:
-            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{ppl}p.{bptt}b'
+            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
             fname = f.format(ppl=int(test_ppl), **vars(args))
             print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)

@@ -266,7 +266,7 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
     return epoch_loss / (len(data) * data.bptt)
 
 
-def train_model(model, train, valid, test, optim, epochs, criterion,
+def train_model(model, train, valid, test, optim, epochs, criterion, d,
                 gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None,
                 reset_hidden=False):
     if gpu:
@@ -280,6 +280,17 @@ def train_model(model, train, valid, test, optim, epochs, criterion,
             model, valid, criterion, subset=subset, reset_hidden=reset_hidden))
         # log checkpoint
         print("Valid perplexity: %g" % valid_ppl)
+        # generate a sentence
+        if isinstance(train, CyclicBlockDataset):
+            for head in train.names:
+                scores, hyps = model.generate(
+                    d.get_bos(), d.get_eos(), gpu=gpu, head=head)
+                print('[%s]: ' + ''.join([d.vocab[c] for c in hyps[0]]) % head)
+                print('Sentence score: %g' % scores[0])
+        else:
+            scores, hyps = model.generate(d.get_bos(), d.get_eos(), gpu=gpu)
+            print(''.join([d.vocab[c] for c in hyps[0]]))
+            print('Sentence score: %g' % scores[0])
         # maybe decay lr
         if optim.method == 'SGD':
             last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_ppl)
