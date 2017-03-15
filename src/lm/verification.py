@@ -4,8 +4,7 @@ import os
 import numpy as np
 from sklearn.metrics import accuracy_score
 
-from modules import ForkableLM, MultiheadLM, LMContainer
-from dataset import Dict
+from modules import LMContainer
 
 
 class Attributor(object):
@@ -18,7 +17,7 @@ class Attributor(object):
             - model, a language model container for several authors
         """
         self.model_container = model_container
-        self.authors = {author: idx for idx, author in enumerate(self.model_container.heads)}
+        self.authors = {a: i for i, a in enumerate(self.model_container.heads)}
 
     def predict_probas(self, texts):
         """
@@ -41,6 +40,9 @@ class Attributor(object):
         return np.array(text_probas, dtype=np.float32)
 
     def get_label(self, label):
+        """
+        Returns the integer label associated with a given str author label
+        """
         return self.model_container.heads[label]
 
     def predict(self, texts):
@@ -80,7 +82,7 @@ if __name__ == '__main__':
 
     print("Loading data...")
     sys.path.append('../')
-    from src.utils import load_letters, split
+    from src.utils import load_letters
     bpath = os.path.expanduser(args.corpus_path)
     letters = load_letters(bpath=bpath, subset='')
 
@@ -92,9 +94,9 @@ if __name__ == '__main__':
     attributor = Attributor(model)
 
     print("Predicting...")
-    labels, texts = zip(*[(l.author[0], lines)
-                          for l, lines in crop_letters(
-                                  letters, args.min_len)])
+    author_lines = [
+        (let.author[0], ls) for let, ls in crop_letters(letters, args.min_len)]
+    labels, texts = zip(*author_lines)
     preds = attributor.predict(texts)
     trues = [attributor.authors[idx] for idx in labels]
     print(accuracy_score(preds, trues))

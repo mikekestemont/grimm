@@ -3,11 +3,12 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-sns.set_style("whitegrid", {'axes.grid' : False})
+sns.set_style("whitegrid", {'axes.grid': False})
 import numpy as np
 
 from itertools import product
 import random
+random.seed(1000)
 import os
 from glob import glob
 from collections import namedtuple, Counter
@@ -110,7 +111,6 @@ def save_letters(letters, target_dir='clean/',
 
 
 def split(letters, test=0.1, dev=0.1):
-    random.shuffle(letters)
     jacob, wilhelm = [], []
     pred = {'Jacob-Grimm': 0, 'Wilhelm-Grimm': 1}
     for l in letters:
@@ -123,27 +123,36 @@ def move_letters(letters, source_dir, target_dir):
         shutil.copyfile(l.abspath, os.path.join(target_dir, l.fn))
 
 
+def letters2lines(letters):
+    return [list(line) for letter in letters for line in letter.lines]
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', required=True)
     parser.add_argument('--output_path', required=True)
     parser.add_argument('--test', type=float, default=0.1)
-    parser.add_argument('--save_all', action='store_true')
+    parser.add_argument(
+        '--save_all', action='store_true',
+        help='save all letters except test set to dataset/all/')
     args = parser.parse_args()
 
     letters = load_letters(bpath=args.path)
-    J, W = split(filter_letters(letters, min_len=0))
-    if args.save_all:
-        all_dir = os.path.join(args.output_path, 'dataset/all/')
-        save_letters(J + W, target_dir=all_dir,
-                     use_original_fname=True,
-                     normalize_whitespace=False)
+    J, W = split(filter_letters(letters, min_len=5))
     J_split = int(len(J) * (1 - args.test))
     W_split = int(len(W) * (1 - args.test))
     train_dir = os.path.join(args.output_path, 'dataset/train/')
+    train_letters = J[:J_split] + W[:W_split]
+    save_letters(train_letters, target_dir=train_dir,
+                 normalize_whitespace=False, use_original_fname=True)
     test_dir = os.path.join(args.output_path, 'dataset/test/')
-    save_letters(J[:J_split] + W[:W_split], target_dir=train_dir,
+    test_letters = J[J_split:] + W[W_split:]
+    save_letters(test_letters, target_dir=test_dir,
                  normalize_whitespace=False, use_original_fname=True)
-    save_letters(J[J_split:] + W[W_split:], target_dir=test_dir,
-                 normalize_whitespace=False, use_original_fname=True)
+    if args.save_all:
+        all_dir = os.path.join(args.output_path, 'dataset/all/')
+        all_but_test = [l for l in letters if l not in test_letters]
+        save_letters(all_but_test, target_dir=all_dir,
+                     use_original_fname=True,
+                     normalize_whitespace=False)
