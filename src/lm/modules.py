@@ -217,17 +217,17 @@ class LM(nn.Module):
             c_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
             return h_0, c_0
 
-    def generate_beam(self, bos, eos,
-                      max_seq_len=20, width=5, gpu=False, **kwargs):
+    def generate_beam(
+            self, bos, eos, max_seq_len=20, width=5, gpu=False, **kwargs):
         "Generate text using beam search decoding"
         self.eval()
         beam = Beam(width, bos, eos, gpu=gpu)
-        hidden = self.init_hidden_for(beam.get_current_state())
+        hidden = None
         while beam.active and len(beam) < max_seq_len:
             prev = Variable(
                 beam.get_current_state().unsqueeze(0), volatile=True)
-            logs, hidden = self(prev, hidden=hidden, **kwargs)
-            beam.advance(logs.data)
+            outs, hidden = self(prev, hidden=hidden, **kwargs)
+            beam.advance(outs.view(-1, outs.size(2)).data)
             if self.cell.startswith('LSTM'):
                 hidden = (u.swap(hidden[0], 1, beam.get_source_beam()),
                           u.swap(hidden[1], 1, beam.get_source_beam()))
@@ -236,29 +236,31 @@ class LM(nn.Module):
         scores, hyps = beam.decode()
         return scores, hyps
 
-    def generate(self, bos, eos,
-                 max_seq_len=20, beam=None, gpu=False, **kwargs):
+    def generate(self, bos, eos, max_seq_len=20, gpu=False, **kwargs):
         "Generate text using simple argmax decoding"
         self.eval()
         prev = Variable(torch.LongTensor([bos]).unsqueeze(0), volatile=True)
         if gpu: prev = prev.cuda()
-        hidden, hyp, score = None, [], []
+        hidden, hyp, scores = None, [], []
         for _ in range(max_seq_len):
-            logs, hidden = self(prev, hidden=hidden, **kwargs)
-            best_score, prev = logs.max(1)
+            outs, hidden = self(prev, hidden=hidden, **kwargs)
+            outs = F.log_softmax(outs.squeeze(0))
+            best_score, prev = outs.max(1)
             prev = prev.t()
-            hyp.append(prev), score.append(best_score)
+            hyp.append(prev.squeeze().data[0])
+            scores.append(best_score.squeeze().data[0])
             if prev.data.eq(eos).nonzero().nelement() > 0:
                 break
-        return [score], [hyp]
+        return [sum(scores) / len(hyp)], [hyp]
 
     def predict_proba(self, inp, gpu=False, **kwargs):
         self.eval()
         inp_vec = Variable(torch.LongTensor([inp]), volatile=True)
         if gpu:
             inp_vec.cuda()
-        logs, hidden = self(inp_vec, **kwargs)
-        return u.select_cols(logs, inp).sum().data[0]
+        outs, hidden = self(inp_vec, **kwargs)
+        logs = u.select_cols(F.log_softmax(outs), inp).sum().exp().data[0]
+        return logs / len(inp)
 
     def forward(self, inp, hidden=None, **kwargs):
         emb = self.embeddings(inp)
@@ -269,8 +271,8 @@ class LM(nn.Module):
             outs = F.dropout(outs, p=self.dropout, training=self.training)
         seq_len, batch, hid_dim = outs.size()
         # (seq_len x batch x hid) -> (seq_len * batch x hid)
-        logs = self.project(outs.view(seq_len * batch, hid_dim))
-        return logs, hidden
+        outs = self.project(outs.view(seq_len * batch, hid_dim))
+        return outs.view(seq_len, batch, outs.size(1)), hidden
 
 
 class ForkableLM(LM):
@@ -355,8 +357,32 @@ class MultiheadLM(LM):
             outs = F.dropout(outs, p=self.dropout, training=self.training)
         seq_len, batch, hid_dim = outs.size()
         # (seq_len x batch x hid) -> (seq_len * batch x hid)
-        logs = self.project[head](outs.view(seq_len * batch, hid_dim))
-        return logs, hidden
+        outs = self.project[head](outs.view(seq_len * batch, hid_dim))
+        return outs.view(seq_len, batch, outs.size(1)), hidden
+
+    @classmethod
+    def from_pretrained_model(cls, that_model, heads, **kwargs):
+        """
+        Create a multihead model from a pretrained LM initializing all weights
+        to the LM states and all heads to the same output projection layer
+        weights of the parent.
+        """
+        assert isinstance(that_model, LM)
+        this_model = cls(
+            that_model.vocab, that_model.emb_dim, that_model.hid_dim,
+            num_layers=that_model.num_layers, cell=that_model.cell,
+            bias=that_model.bias, dropout=that_model.dropout, heads=heads,
+            **kwargs)
+        this_state_dict = this_model.state_dict()
+        for p, w in that_model.state_dict().items():
+            if p in this_state_dict:
+                this_state_dict[p] = w
+            else:               # you got project layer
+                *_, weight = p.split('.')
+                for head in this_model.heads:
+                    this_state_dict[head + "." + weight] = w
+        this_model.load_state_dict(this_state_dict)
+        return this_model
 
 
 def load_model(path):
@@ -386,8 +412,8 @@ class LMContainer(object):
         self.d = d
         if isinstance(self.models, dict):
             for model in self.models.values():
-                assert isinstance(model, ForkableLM), "Expected ForkableLM"
-            # forkable models
+                assert isinstance(model, LM), "Expected LM"
+            # LM or ForkableLM models
             self.heads = list(d.keys())
             self.get_head = lambda head: self.models[head]
         elif isinstance(self.models, MultiheadLM):
@@ -405,10 +431,15 @@ class LMContainer(object):
             self.get_head(head).cpu()
 
     def predict_proba(self, text, author, gpu=False):
-        inp = [c for l in self.d.transform(text) for c in l]
+        if isinstance(self.d, dict):
+            d = self.d[author]
+        else:
+            d = self.d
+        inp = [c for l in d.transform(text) for c in l]
         return self.get_head(author).predict_proba(inp, head=author)
 
     def to_disk(self, prefix, mode='torch'):
+        self.cpu()              # always move to cpu
         if mode == 'torch':
             import torch
             save_fn, ext = torch.save, 'pt'
@@ -418,7 +449,7 @@ class LMContainer(object):
         else:
             raise ValueError("Unknown mode [%s]" % mode)
         if isinstance(self.models, dict):
-            # forkable models
+            # LM models
             for head, model in self.models.items():
                 with open(prefix + '_' + head + '.' + ext, 'wb') as f:
                     save_fn(model, f)
