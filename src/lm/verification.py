@@ -97,6 +97,7 @@ if __name__ == '__main__':
     author_lines = [
         (let.author[0], ls) for let, ls in crop_letters(letters, args.min_len)]
     labels, texts = zip(*author_lines)
-    preds = attributor.predict(texts)
+    probs = attributor.predict_probas(texts)
+    preds = probs.argmax(axis=-1)
     trues = [attributor.authors[idx] for idx in labels]
     print(accuracy_score(preds, trues))

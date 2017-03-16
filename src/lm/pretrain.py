@@ -90,18 +90,18 @@ if __name__ == '__main__':
 
     try:
         start = time.time()
-        trained_models, test_ppl = u.train_model(
-            model, train, valid, test, optim, args.epochs, criterion,
+        test_ppl = u.train_model(
+            model, train, valid, test, optim, args.epochs, criterion, d,
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
-        if args.save:
-            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
-            fname = f.format(ppl=int(test_ppl), **vars(args))
-            print("Saving model to [%s]..." % fname)
-            lm = LMContainer(trained_models, d).to_disk(fname)
     except (EarlyStoppingException, KeyboardInterrupt) as e:
+        pass
+    finally:
         test_ppl = math.exp(u.validate_model(model, test, criterion))
         print("Test perplexity: %g" % test_ppl)
-    finally:
         print("Trained for [%d] secs" % (time.time() - start))
-        test_ppl = math.exp(u.validate_model(model, test, criterion))
+        if args.save:
+            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
+            fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
+            print("Saving model to [%s]..." % fname)
+            u.save_model(model, fname, d=d)

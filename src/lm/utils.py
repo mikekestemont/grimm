@@ -19,6 +19,36 @@ EOS = '<eos>'
 PAD = '<pad>'
 
 
+# General utils
+def load_model(path):
+    if path.endswith('pickle'):
+        import pickle as p
+        load_fn = p.load
+    elif path.endswith('pt'):
+        import torch
+        load_fn = torch.load
+    else:
+        raise ValueError("Unknown file format [%s]" % path)
+    with open(path, 'rb') as f:
+        return load_fn(f)
+
+
+def save_model(model, prefix, d=None, mode='torch'):
+    if mode == 'torch':
+        import torch
+        save_fn, ext = torch.save, 'pt'
+    elif mode == 'pickle':
+        import pickle as p
+        save_fn, ext = p.dump, 'pickle'
+    else:
+        raise ValueError("Unknown mode [%s]" % mode)
+    with open(prefix + "." + ext, 'wb') as f:
+        save_fn(model, f)
+    if d is not None:
+        with open(prefix + ".dict." + ext, 'wb') as f:
+            save_fn(d, f)
+
+
 # Pytorch utils
 def merge_states(state_dict1, state_dict2, merge_map):
     """
@@ -266,9 +296,16 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
     return epoch_loss / (len(data) * data.bptt)
 
 
+def print_hypotheses(scores, hyps, d):
+    for idx, (score, hyp) in enumerate(zip(scores, hyps)):
+        print('*** Hypothesis %d' % (idx + 1))
+        print('* ' + ''.join([d.vocab[c] for c in hyp]))
+        print('* Sentence score: %g' % (score / len(hyp)))
+
+
 def train_model(model, train, valid, test, optim, epochs, criterion, d,
                 gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None,
-                reset_hidden=False):
+                reset_hidden=False, max_seq_len=100):
     if gpu:
         criterion.cuda(), model.cuda()
 
@@ -281,16 +318,19 @@ def train_model(model, train, valid, test, optim, epochs, criterion, d,
         # log checkpoint
         print("Valid perplexity: %g" % valid_ppl)
         # generate a sentence
+        print("Generating text...")
         if isinstance(train, CyclicBlockDataset):
             for head in train.names:
-                scores, hyps = model.generate(
-                    d.get_bos(), d.get_eos(), gpu=gpu, head=head)
-                print('[%s]: ' + ''.join([d.vocab[c] for c in hyps[0]]) % head)
-                print('Sentence score: %g' % scores[0])
+                scores, hyps = model.generate_beam(
+                    d.get_bos(), d.get_eos(),
+                    gpu=gpu, head=head, max_seq_len=max_seq_len)
+                print('* [%s]: ' % head)
+                print_hypotheses(scores, hyps, d)
         else:
-            scores, hyps = model.generate(d.get_bos(), d.get_eos(), gpu=gpu)
-            print(''.join([d.vocab[c] for c in hyps[0]]))
-            print('Sentence score: %g' % scores[0])
+            scores, hyps = model.generate_beam(
+                d.get_bos(), d.get_eos(), gpu=gpu, max_seq_len=max_seq_len)
+            print_hypotheses(scores, hyps, d)
+        print("***")
         # maybe decay lr
         if optim.method == 'SGD':
             last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_ppl)
@@ -301,6 +341,7 @@ def train_model(model, train, valid, test, optim, epochs, criterion, d,
         model.train()
 
     for epoch in range(1, epochs + 1):
+        print("Starting epoch [%d]" % epoch)
         # train
         model.train()
         train_loss = train_epoch(

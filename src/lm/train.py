@@ -50,7 +50,12 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', required=True)
+    parser.add_argument('--pretrained', action='store_true')
+    parser.add_argument('--model_path', type=str)
+    parser.add_argument('--dict_path', type=str)
     parser.add_argument('--already_split', action='store_true')
+    parser.add_argument('--freeze_rnn', action='store_true')
+    parser.add_argument('--freeze_emb', action='store_true')
     parser.add_argument('--training_mode', required=True)
     parser.add_argument('--max_size', default=1000000, type=int)
     parser.add_argument('--min_freq', default=1, type=int)
@@ -89,15 +94,20 @@ if __name__ == '__main__':
         letters = load_letters(bpath=bpath, **kwargs)
         return split(filter_letters(letters, min_len=0))
 
-    d = Dict(max_size=args.max_size, min_freq=args.min_freq,
-             bos_token=u.BOS, eos_token=u.EOS)
+    if args.pretrained:
+        assert args.dict_path, "Needs dict path for loading pretrained models"
+        d = u.load_model(args.dict_path)
+    else:
+        d = Dict(max_size=args.max_size, min_freq=args.min_freq,
+                 bos_token=u.BOS, eos_token=u.EOS)
 
     if args.already_split:      # fetch already splitted datasets
         train_J, train_W = load_files(subset='train/', start_from_line=0)
         train_J, train_W = letters2lines(train_J), letters2lines(train_W)
         test_J, test_W = load_files(subset='test/', start_from_line=0)
         test_J, test_W = letters2lines(test_J), letters2lines(test_W)
-        d.fit(train_J, train_W)
+        if not d.fitted:
+            d.fit(train_J, train_W)
         test = CyclicBlockDataset(
             {'J': test_J, 'W': test_W}, d, args.batch_size, args.bptt,
             gpu=args.gpu, evaluation=True)
@@ -107,13 +117,13 @@ if __name__ == '__main__':
     else:                       # fetch raw datasets computing splits
         J, W = load_files()
         J, W = letters2lines(J), letters2lines(W)
-        d.fit(J, W)
+        if not d.fitted:
+            d.fit(J, W)
         train, test, valid = CyclicBlockDataset(
             {'J': J, 'W': W}, d, args.batch_size, args.bptt,
             gpu=args.gpu).splits(dev=0.1)
 
     print(' * vocabulary size. %d' % len(d))
-
     print(" * number of train batches. %d" % (len(train) * args.bptt))
     print(" * number of test batches. %d" % (len(test) * args.bptt))
     print(" * number of valid batches. %d" % (len(valid) * args.bptt))
@@ -132,10 +142,22 @@ if __name__ == '__main__':
     else:
         raise ValueError("Unknown training mode [%s]" % args.training_mode)
 
-    model = model_type(
-        len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
+    if args.pretrained:
+        assert args.training_mode.startswith('multi'), \
+            "retrained only implemented for MultiheadLM"
+        assert args.model_path, "Needs model path for loading pretrained model"
+        pretrained = u.load_model(args.model_path)
+        model = MultiheadLM.from_pretrained_model(pretrained, opts['heads'])
+    else:
+        model = model_type(
+            len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
 
     model.apply(u.make_initializer())
+
+    if args.freeze_rnn:
+        model.freeze_submodule('rnn')
+    if args.freeze_emb:
+        model.freeze_submodule('embeddings')
 
     print(model)
     print(" * number of model parameters. %d" % model.n_params())
@@ -154,12 +176,10 @@ if __name__ == '__main__':
             checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
         if args.save:
             f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
-            fname = f.format(ppl=int(test_ppl), **vars(args))
+            fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
             print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)
     except (EarlyStoppingException, KeyboardInterrupt) as e:
-        test_ppl = math.exp(u.validate_model(model, test, criterion))
-        print("Test perplexity: %g" % test_ppl)
-    finally:
         print("Trained for [%d] secs" % (time.time() - start))
         test_ppl = math.exp(u.validate_model(model, test, criterion))
+        print("Test perplexity: %g" % test_ppl)

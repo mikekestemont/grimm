@@ -173,9 +173,9 @@ class LM(nn.Module):
     def n_params(self):
         return sum([p.nelement() for p in self.parameters()])
 
-    def freeze_submodule(self, module):
+    def freeze_submodule(self, module, flag=False):
         for p in getattr(self, module).parameters():
-            p.requires_grad = False
+            p.requires_grad = flag
 
     def init_hidden_for(self, inp):
         batch = inp.size(1)
@@ -197,13 +197,15 @@ class LM(nn.Module):
             prev = Variable(
                 beam.get_current_state().unsqueeze(0), volatile=True)
             outs, hidden = self(prev, hidden=hidden, **kwargs)
-            beam.advance(outs.view(-1, outs.size(2)).data)
+            outs = outs.view(-1, outs.size(2))  # collapse batch dimension
+            logs = F.log_softmax(outs)
+            beam.advance(logs.data)
             if self.cell.startswith('LSTM'):
                 hidden = (u.swap(hidden[0], 1, beam.get_source_beam()),
                           u.swap(hidden[1], 1, beam.get_source_beam()))
             else:
                 hidden = u.swap(hidden, 1, beam.get_source_beam())
-        scores, hyps = beam.decode()
+        scores, hyps = beam.decode(n=width)
         return scores, hyps
 
     def generate(self, bos, eos, max_seq_len=20, gpu=False, **kwargs):
@@ -214,14 +216,15 @@ class LM(nn.Module):
         hidden, hyp, scores = None, [], []
         for _ in range(max_seq_len):
             outs, hidden = self(prev, hidden=hidden, **kwargs)
-            outs = F.log_softmax(outs.squeeze(0))
+            outs = outs.squeeze(0)  # remove batch dim
+            outs = F.log_softmax(outs)
             best_score, prev = outs.max(1)
             prev = prev.t()
             hyp.append(prev.squeeze().data[0])
             scores.append(best_score.squeeze().data[0])
             if prev.data.eq(eos).nonzero().nelement() > 0:
                 break
-        return [sum(scores) / len(hyp)], [hyp]
+        return [scores], [hyp]
 
     def predict_proba(self, inp, gpu=False, **kwargs):
         self.eval()
@@ -229,8 +232,9 @@ class LM(nn.Module):
         if gpu:
             inp_vec.cuda()
         outs, hidden = self(inp_vec, **kwargs)
-        logs = u.select_cols(F.log_softmax(outs), inp).sum().exp().data[0]
-        return logs / len(inp)
+        outs = outs.squeeze(0)  # remove batch dim
+        outs = u.select_cols(F.log_softmax(outs), inp).sum()
+        return outs.data[0] / len(inp)
 
     def forward(self, inp, hidden=None, **kwargs):
         emb = self.embeddings(inp)
@@ -355,19 +359,6 @@ class MultiheadLM(LM):
         return this_model
 
 
-def load_model(path):
-    if path.endswith('pickle'):
-        import pickle as p
-        load_fn = p.load
-    elif path.endswith('pt'):
-        import torch
-        load_fn = torch.load
-    else:
-        raise ValueError("Unknown file format [%s]" % path)
-    with open(path, 'rb') as f:
-        return load_fn(f)
-
-
 class LMContainer(object):
     def __init__(self, models, d):
         """
@@ -410,24 +401,13 @@ class LMContainer(object):
 
     def to_disk(self, prefix, mode='torch'):
         self.cpu()              # always move to cpu
-        if mode == 'torch':
-            import torch
-            save_fn, ext = torch.save, 'pt'
-        elif mode == 'pickle':
-            import pickle as p
-            save_fn, ext = p.dump, 'pickle'
-        else:
-            raise ValueError("Unknown mode [%s]" % mode)
         if isinstance(self.models, dict):
             # LM models
             for head, model in self.models.items():
-                with open(prefix + '_' + head + '.' + ext, 'wb') as f:
-                    save_fn(model, f)
+                u.save_model(prefix + '_' + head, mode=mode)
         else:
-            with open(prefix + '.' + ext, 'wb') as f:
-                save_fn(self.models, f)
-        with open(prefix + '.dict.' + ext, 'wb') as f:
-            save_fn(self.d, f)
+            u.save_model(self.models, prefix, mode=mode)
+        u.save_model(self.d, prefix + '.dict', mode=mode)
 
     @classmethod
     def from_disk(cls, model_path, d_path):
@@ -444,8 +424,8 @@ class LMContainer(object):
         if isinstance(model_path, dict):
             model = {}
             for k, path in model_path.items():
-                model[k] = load_model(path)
+                model[k] = u.load_model(path)
         else:
-            model = load_model(model_path)
-        d = load_model(d_path)
+            model = u.load_model(model_path)
+        d = u.load_model(d_path)
         return cls(model, d)
