@@ -144,7 +144,7 @@ if __name__ == '__main__':
 
     if args.pretrained:
         assert args.training_mode.startswith('multi'), \
-            "retrained only implemented for MultiheadLM"
+            "pretrained only implemented for MultiheadLM"
         assert args.model_path, "Needs model path for loading pretrained model"
         pretrained = u.load_model(args.model_path)
         model = MultiheadLM.from_pretrained_model(pretrained, opts['heads'])
@@ -175,7 +175,13 @@ if __name__ == '__main__':
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
         if args.save:
-            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
+            parent = '.'.join(os.path.basename(args.model_path).split('.')[:-1])
+            if args.pretrained:
+                f = '{prefix}.{parent}'.format(
+                    prefix=args.prefix, parent=parent)
+            else:
+                f = '{prefix}.{cell}.{layers}l.{hid_dim}' + \
+                    'h.{emb_dim}e.{bptt}b.{ppl}'
             fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
             print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)

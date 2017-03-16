@@ -386,10 +386,12 @@ class LMContainer(object):
     def cuda(self):
         for head in self.heads:
             self.get_head(head).cuda()
+        return self
 
     def cpu(self):
         for head in self.heads:
             self.get_head(head).cpu()
+        return self
 
     def predict_proba(self, text, author, gpu=False):
         if isinstance(self.d, dict):
