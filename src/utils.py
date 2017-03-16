@@ -10,6 +10,7 @@ from itertools import product
 import random
 random.seed(1000)
 import os
+import re
 from glob import glob
 from collections import namedtuple, Counter
 import shutil
@@ -123,8 +124,40 @@ def move_letters(letters, source_dir, target_dir):
         shutil.copyfile(l.abspath, os.path.join(target_dir, l.fn))
 
 
-def letters2lines(letters):
-    return [list(line) for letter in letters for line in letter.lines]
+def make_preprocessor(
+        keep_newlines=False,
+        normalize_whitespace=True,
+        replace_num=True,
+        lowercase=True):
+    def preprocessor(lines):
+        output = []
+        for line in lines:
+            if len(line.split()) == 0:
+                continue
+            if normalize_whitespace:
+                line = ' '.join(line.split())
+            if replace_num:
+                line = re.sub(r'[0-9]', '0', line)
+            if lowercase:
+                line = line.lower()
+            if keep_newlines:
+                if len(output) == 0:
+                    output = [line]
+                else:
+                    output[0] += line
+            else:
+                output.append(line)
+        return output
+    return preprocessor
+
+
+def letters2lines(letters, preprocessor=make_preprocessor()):
+    preprocessor = preprocessor or (lambda lines: lines)
+    lines = []
+    for letter in letters:
+        for line in preprocessor(letter.lines):
+            lines.append(line)
+    return lines
 
 
 if __name__ == '__main__':

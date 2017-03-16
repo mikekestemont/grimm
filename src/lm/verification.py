@@ -1,9 +1,11 @@
 
+import random
 import sys
+sys.path.append('../')
 import os
 import numpy as np
-from sklearn.metrics import accuracy_score
-
+from sklearn.metrics import classification_report
+from src.utils import letters2lines, load_letters
 from modules import LMContainer
 
 
@@ -33,11 +35,12 @@ class Attributor(object):
         text_probas = []
 
         for idx, text in enumerate(texts):
-            print("Processing [%d/%d]" % (idx + 1, len(texts)))
             text_probas.append(
                 [self.model_container.predict_proba(text, author)
                  for author in self.model_container.heads])
-        return np.array(text_probas, dtype=np.float32)
+        probs = np.array(text_probas, dtype=np.float32)
+        norm_probs = (probs - probs.mean(0)) / probs.std(0)
+        return norm_probs
 
     def get_label(self, label):
         """
@@ -71,33 +74,55 @@ def crop_letters(letters, min_len):
                 break
 
 
+def filter_letters(letters, min_len):
+    for letter in letters:
+        n_chars = len([c for l in letter.lines for c in l])
+        if n_chars >= min_len:
+            yield letter
+
+
+def prepare_letters(letters, min_len, use_preprocessor=False):
+    labels, texts = [], []
+    for letter in filter_letters(letters, min_len):
+        labels.append(letter.author[0])  # take initial
+        if use_preprocessor:
+            text = letters2lines([letter])
+        else:
+            text = letters2lines([letter], preprocessor=None)
+        texts.append(text)
+    return labels, texts
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_prefix', required=True)
     parser.add_argument('--corpus_path', required=True)
     parser.add_argument('--min_len', type=int, default=200)
+    parser.add_argument('--max_letters', type=int, default=-1)
+    parser.add_argument('--use_preprocessor', action='store_true')
+    parser.add_argument('--seed', type=int, default=1001)
 
     args = parser.parse_args()
 
     print("Loading data...")
-    sys.path.append('../')
-    from src.utils import load_letters
     bpath = os.path.expanduser(args.corpus_path)
-    letters = load_letters(bpath=bpath, subset='')
+    letters = load_letters(bpath=bpath, subset='', start_from_line=0)
+    random.seed(args.seed)
+    random.shuffle(letters)
+    labels, texts = prepare_letters(
+        letters, args.min_len, use_preprocessor=args.use_preprocessor)
+    max_len = len(labels) if args.max_letters < 0 else args.max_letters
+    labels, texts = labels[:max_len], texts[:max_len]
 
     print("Loading model...")
     model_path = args.model_prefix + '.pt'
     d_path = args.model_prefix + '.dict.pt'
-    model = LMContainer.from_disk(model_path, d_path)
-    model.cpu()
+    model = LMContainer.from_disk(model_path, d_path).cpu()
     attributor = Attributor(model)
 
     print("Predicting...")
-    author_lines = [
-        (let.author[0], ls) for let, ls in crop_letters(letters, args.min_len)]
-    labels, texts = zip(*author_lines)
     probs = attributor.predict_probas(texts)
     preds = probs.argmax(axis=-1)
     trues = [attributor.authors[idx] for idx in labels]
-    print(accuracy_score(preds, trues))
+    print(classification_report(trues, preds))
