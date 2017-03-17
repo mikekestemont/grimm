@@ -235,8 +235,8 @@ def repackage_hidden(h):
 
 
 def validate_model(model, data, criterion, subset=None, reset_hidden=False):
-    loss, hidden = 0, None
-    for i in range(0, len(data) - 1):
+    loss, num_words, hidden = 0, 0, None
+    for i in range(len(data)):
         if isinstance(data, CyclicBlockDataset):
             source, targets, head = data[i]
             if subset is not None and subset != head:
@@ -248,10 +248,11 @@ def validate_model(model, data, criterion, subset=None, reset_hidden=False):
             # since loss is averaged across observations for each minibatch
         output = output.view(-1, output.size(2))
         loss += len(source) * criterion(output, targets).data[0]
+        num_words += len(source)
         if reset_hidden:
             hidden.data.zero_()
         hidden = repackage_hidden(hidden)
-    return loss / (len(data) * data.bptt)
+    return loss / num_words
 
 
 def train_epoch(model, data, optim, criterion, epoch, checkpoint,
@@ -259,10 +260,11 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
     """
     hook: compute `on_hook` every `hook` checkpoints
     """
-    epoch_loss, batch_loss, report_words, hidden = 0, 0, 0, None
+    epoch_loss, report_loss, report_words, epoch_words = 0, 0, 0, 0
+    hidden = None
     start = time.time()
 
-    for i in range(0, len(data) - 1):
+    for i in range(len(data)):
         model.zero_grad()
         if isinstance(data, CyclicBlockDataset):
             source, targets, head = data[i]
@@ -280,20 +282,21 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
         loss.backward(), optim.step()
         # since loss is averaged across observations for each minibatch
         epoch_loss += len(source) * loss.data[0]
-        batch_loss += loss.data[0]
-        report_words += targets.nelement()
+        report_loss += len(source) * loss.data[0]
+        report_words += len(source)
+        epoch_words += len(source)
 
         if i % checkpoint == 0 and i > 0:
             print("Epoch %d, %5d/%5d batches; ppl: %6.2f; %3.0f tokens/s" %
-                  (epoch, i, len(data), math.exp(batch_loss / checkpoint),
+                  (epoch, i, len(data), math.exp(report_loss / report_words),
                    report_words / (time.time() - start)))
-            report_words = batch_loss = 0
+            report_words = report_loss = 0
             start = time.time()
             # call thunk every `hook` checkpoints
             if hook and (i // checkpoint) % hook == 0:
                 if on_hook is not None:
                     on_hook(i // checkpoint)
-    return epoch_loss / (len(data) * data.bptt)
+    return epoch_loss / epoch_words
 
 
 def print_hypotheses(scores, hyps, d):
