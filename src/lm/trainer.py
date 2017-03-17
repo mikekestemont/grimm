@@ -150,12 +150,13 @@ class Trainer(object):
         epoch_loss, checkpoint_loss, epoch_words, checkpoint_words = 0, 0, 0, 0
         for batch_num, batch in enumerate(batch_order):
             self.zero_grad()
+            # TODO: loss might be complex (perhaps use np.array?)
             loss = self.run_batch(batch, dataset='train', **kwargs)
             self.on_batch_end(batch, loss)
             # report
             num_examples = self.num_batch_examples(self.datasets['train'][batch])
-            epoch_loss += num_examples * loss.data[0]
-            report_loss += num_examples * loss.data[0]
+            epoch_loss += num_examples * loss.data[0]  # dependent on loss being averaged
+            report_loss += num_examples * loss.data[0]  # see `size_average` property
             epoch_words += num_examples
             report_words += num_examples
             # checkpoint
