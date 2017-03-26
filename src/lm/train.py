@@ -24,28 +24,6 @@ from early_stopping import EarlyStoppingException
 import utils as u
 
 
-def train_model_fork(
-        model, train, valid, test, optim, epochs, criterion, d, **kwargs):
-    print("Training main")
-    test_ppl = u.train_model(
-        model, train, valid, test, optim, epochs, criterion, d, **kwargs)
-    model_J, model_W = model.fork_model(), model.fork_model()
-    for label, model in [('J', model_J), ('W', model_W)]:
-        print("Training brother [%s]" % label)
-        optim.set_params(model.parameters())
-        u.train_model(
-            model, train, valid, test, optim, epochs, criterion, d, **kwargs)
-    return {'J': model_J, 'W': model_W}, test_ppl
-
-
-def train_model_multihead(
-        model, train, valid, test, optim, epochs, criterion, d, **kwargs):
-    print("Training main")
-    test_ppl = u.train_model(
-        model, train, valid, test, optim, epochs, criterion, d, **kwargs)
-    return model, test_ppl
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
@@ -56,7 +34,6 @@ if __name__ == '__main__':
     parser.add_argument('--already_split', action='store_true')
     parser.add_argument('--freeze_rnn', action='store_true')
     parser.add_argument('--freeze_emb', action='store_true')
-    parser.add_argument('--training_mode', required=True)
     parser.add_argument('--max_size', default=1000000, type=int)
     parser.add_argument('--min_freq', default=1, type=int)
     parser.add_argument('--layers', default=2, type=int)
@@ -132,24 +109,15 @@ if __name__ == '__main__':
 
     opts = {"num_layers": args.layers, "dropout": args.dropout,
             "tie_weights": args.tie_weights,
-            "project_on_tied_weights": args.project_on_tied_weights}
-
-    if args.training_mode.startswith('fork'):
-        model_type, train_fn = ForkableLM, train_model_fork
-    elif args.training_mode.startswith('multi'):
-        model_type, train_fn = MultiheadLM, train_model_multihead
-        opts.update({'heads': ('W', 'J')})
-    else:
-        raise ValueError("Unknown training mode [%s]" % args.training_mode)
+            "project_on_tied_weights": args.project_on_tied_weights,
+            "heads": ('W', 'J')}
 
     if args.pretrained:
-        assert args.training_mode.startswith('multi'), \
-            "pretrained only implemented for MultiheadLM"
         assert args.model_path, "Needs model path for loading pretrained model"
         pretrained = u.load_model(args.model_path)
         model = MultiheadLM.from_pretrained_model(pretrained, opts['heads'])
     else:
-        model = model_type(
+        model = MultiheadLM(
             len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
 
     model.apply(u.make_initializer())
@@ -170,10 +138,18 @@ if __name__ == '__main__':
 
     try:
         start = time.time()
-        trained_models, test_ppl = train_fn(
+        u.train_model(
             model, train, valid, test, optim, args.epochs, criterion, d,
             gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
             checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
+    except EarlyStoppingException as e:
+        print(e.message, e.data['smallest'])
+    except KeyboardInterrupt:
+        print("Interrupted")
+    finally:
+        print("Trained for [%d] secs" % (time.time() - start))
+        test_ppl = math.exp(u.validate_model(model, test, criterion))
+        print("Test perplexity: %g" % test_ppl)
         if args.save:
             parent = '.'.join(os.path.basename(args.model_path).split('.')[:-1])
             if args.pretrained:
@@ -185,7 +161,3 @@ if __name__ == '__main__':
             fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
             print("Saving model to [%s]..." % fname)
             lm = LMContainer(trained_models, d).to_disk(fname)
-    except (EarlyStoppingException, KeyboardInterrupt) as e:
-        print("Trained for [%d] secs" % (time.time() - start))
-        test_ppl = math.exp(u.validate_model(model, test, criterion))
-        print("Test perplexity: %g" % test_ppl)
