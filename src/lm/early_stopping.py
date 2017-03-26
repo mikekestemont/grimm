@@ -2,13 +2,6 @@
 import heapq
 
 
-class EarlyStoppingException(Exception):
-    def __init(self, message, data={}):
-        super(EarlyStopping, self).__init__(message)
-        self.message = message
-        self.data = data
-
-
 class pqueue(object):
     def __init__(self, maxsize, max=False):
         self.queue = []
@@ -42,6 +35,13 @@ class pqueue(object):
 
     def is_full(self):
         return len(self) == self.maxsize
+
+
+class EarlyStoppingException(Exception):
+    def __init(self, message, data={}):
+        super(EarlyStopping, self).__init__(message)
+        self.message = message
+        self.data = data
 
 
 class EarlyStopping(pqueue):
