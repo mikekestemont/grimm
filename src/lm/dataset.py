@@ -3,6 +3,7 @@ import random
 from collections import Counter
 
 import torch
+import torch.utils.data
 from torch.autograd import Variable
 
 
@@ -161,7 +162,7 @@ class BatchIterator(object):
         return self.num_batches
 
 
-class Dataset(object):
+class Dataset(torch.utils.data.Dataset):
     @classmethod
     def from_disk(cls, path):
         with open(path, 'rb') as f:
