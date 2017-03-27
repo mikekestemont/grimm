@@ -219,8 +219,10 @@ class Trainer(object):
                     self.on_validation_end(epoch, valid_loss)
                 self.on_epoch_end(
                     epoch, epoch_loss, epoch_examples, epoch_time)
-            except EarlyStoppingException:
-                break  # go to test on early stopping
+            except EarlyStoppingException as e:
+                m = "%s. Best valid loss: %g" % (e.message, e.data['smallest'])
+                self.log("info", {"message": m})
+                break
             except KeyboardInterrupt:
                 self.log("info", {"message": "Training interrupted"})
                 break

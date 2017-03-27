@@ -1,28 +1,53 @@
 
 import os
 import sys
-import time
-import math
 
 seed = 1001
-import random
+import random                   # nopep8
 random.seed(seed)
 
-import torch
+import torch                    # nopep8
 try:
     torch.cuda.manual_seed(seed)
 except:
     print('no NVIDIA driver found')
 torch.manual_seed(seed)
 
-import torch.nn as nn
+import torch.nn as nn           # nopep8
 
-from modules import ForkableLM, MultiheadLM, LMContainer
-from optimizer import Optimizer
-from dataset import Dict, CyclicBlockDataset
-from trainer import LMTrainer, Logger
-from early_stopping import EarlyStoppingException, EarlyStopping
-import utils as u
+from modules import MultiheadLM, LMContainer  # nopep8
+from optimizer import Optimizer               # nopep8
+from dataset import Dict, CyclicBlockDataset  # nopep8
+from trainer import LMTrainer, Logger         # nopep8
+from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
+import utils as u                                                 # nopep8
+
+
+def make_model_check_hook(gpu, early_stopping):
+
+    def hook(trainer, batch_num, checkpoint):
+        print("Checking training...")
+        loss = trainer.validate_model()
+        print("Valid loss: %g" % loss)
+        print("Registering early stopping loss...")
+        if early_stopping is not None:
+            early_stopping.add_checkpoint(loss)
+        print("Generating text...")
+        print("***")
+        if isinstance(trainer.datasets["train"], CyclicBlockDataset):
+            for head in trainer.datasets["train"].names:
+                scores, hyps = trainer.model.generate_beam(
+                    d.get_bos(), d.get_eos(),
+                    head=head, gpu=gpu, max_seq_len=100)
+                print(' * [%s]' % head)
+                u.print_hypotheses(scores, hyps, d)
+        else:
+            scores, hyps = trainer.model.generate_beam(
+                d.get_bos(), d.get_eos(), gpu=gpu, max_seq_len=100)
+            u.print_hypotheses(scores, hyps, d)
+        print("***")
+
+    return hook
 
 
 if __name__ == '__main__':
@@ -49,9 +74,8 @@ if __name__ == '__main__':
     parser.add_argument('--reset_hidden', action='store_true')
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--checkpoint', default=50, type=int)
-    parser.add_argument('--hook', default=10, type=int,
-                        help='Compute valid ppl after so many checkpoints')
-    parser.add_argument('--early_stop', default=10, type=int)
+    parser.add_argument('--checkpoints_per_epoch', default=5, type=int)
+    parser.add_argument('--early_stopping', default=10, type=int)
     parser.add_argument('--optim', default='RMSprop', type=str)
     parser.add_argument('--learning_rate', default=0.01, type=float)
     parser.add_argument('--learning_rate_decay', default=0.5, type=float)
@@ -138,59 +162,27 @@ if __name__ == '__main__':
         lr_decay=args.learning_rate_decay, start_decay_at=args.start_decay_at)
     criterion = nn.CrossEntropyLoss()
 
-    class Trainer(LMTrainer):
-        def on_test_end(self, loss):
-            super(Trainer, self).on_test_end(loss)
-            if args.save:
-                parent =\
-                    '.'.join(os.path.basename(args.model_path).split('.')[:-1])
-                if args.pretrained:
-                    f = '{prefix}.{parent}'.format(
-                        prefix=args.prefix, parent=parent)
-                else:
-                    f = '{prefix}.{cell}.{layers}l.{hid_dim}' + \
-                        'h.{emb_dim}e.{bptt}b.{ppl}'
-                fname = f.format(ppl="%.2f" % loss, **vars(args))
-                print("Saving model to [%s]..." % fname)
-                LMContainer(model, d).to_disk(fname)
-
     datasets = {'train': train, 'valid': valid, 'test': test}
-    trainer = Trainer(model, datasets, criterion, optim)
+    trainer = LMTrainer(model, datasets, criterion, optim)
 
-    if args.early_stop > 0:
-        early_stopping = EarlyStopping(args.early_stop)
-
-    def model_check_hook(trainer, batch_num, checkpoint):
-        print("Checking training...")
-        loss = trainer.validate_model()
-        print("Valid loss: %g" % loss)
-        print("Registering early stopping loss...")
-        if args.early_stop > 0:
-            try:
-                early_stopping.add_checkpoint(loss)
-            except EarlyStoppingException as e:
-                m = "%s. Best valid loss: %g" % (e.message, e.data['smallest'])
-                trainer.log("info", {"message": m})
-                raise e
-        print("Generating text...")
-        print("***")
-        if isinstance(trainer.datasets["train"], CyclicBlockDataset):
-            for head in trainer.datasets["train"].names:
-                scores, hyps = trainer.model.generate_beam(
-                    d.get_bos(), d.get_eos(),
-                    head=head, gpu=args.gpu, max_seq_len=100)
-                print(' * [%s]' % head)
-                u.print_hypotheses(scores, hyps, d)
-        else:
-            scores, hyps = model.generate_beam(
-                d.get_bos(), d.get_eos(), gpu=args.gpu, max_seq_len=100)
-            u.print_hypotheses(scores, hyps, d)
-        print("***")
-
-    checkpoints_per_epoch = 5
-    num_checkpoints = len(train) // (args.checkpoint * checkpoints_per_epoch)
-    trainer.add_hook(model_check_hook, num_checkpoints=num_checkpoints)
+    if args.early_stopping > 0:
+        early_stopping = EarlyStopping(args.early_stopping)
+    model_check_hook = make_model_check_hook(
+        args.gpu, early_stopping=early_stopping)
+    num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
+    trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 
     trainer.add_loggers(Logger())
 
     trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)
+
+    if args.save:
+        loss = trainer.validate_model(test=True)
+        parent = '.'.join(os.path.basename(args.model_path).split('.')[:-1])
+        if args.pretrained:
+            f = '{prefix}.{parent}'.format(prefix=args.prefix, parent=parent)
+        else:
+            f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
+        fname = f.format(ppl="%.2f" % loss, **vars(args))
+        print("Saving model to [%s]..." % fname)
+        LMContainer(model, d).to_disk(fname)
