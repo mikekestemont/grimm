@@ -1,27 +1,27 @@
 
 import os
 import sys
-import time
-import math
 
 seed = 1001
-import random
+import random                   # nopep8
 random.seed(seed)
 
-import torch
+import torch                    # nopep8
 try:
     torch.cuda.manual_seed(seed)
 except:
     print('no NVIDIA driver found')
 torch.manual_seed(seed)
 
-import torch.nn as nn
+import torch.nn as nn           # nopep8
 
-from modules import LM, LMContainer
-from optimizer import Optimizer
-from dataset import Dict, BlockDataset
-from early_stopping import EarlyStoppingException
-import utils as u
+from modules import LM, LMContainer          # nopep8
+from optimizer import Optimizer              # nopep8
+from dataset import Dict, BlockDataset, CyclicBlockDataset  # nopep8
+from trainer import LMTrainer, Logger                       # nopep8
+from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
+from train import make_model_check_hook                           # nopep8
+import utils as u                                                 # nopep8
 
 
 if __name__ == '__main__':
@@ -40,9 +40,8 @@ if __name__ == '__main__':
     parser.add_argument('--reset_hidden', action='store_true')
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--checkpoint', default=50, type=int)
-    parser.add_argument('--hook', default=10, type=int,
-                        help='Compute valid ppl after so many checkpoints')
-    parser.add_argument('--early_stop', default=10, type=int)
+    parser.add_argument('--checkpoints_per_epoch', default=5, type=int)
+    parser.add_argument('--early_stopping', default=10, type=int)
     parser.add_argument('--optim', default='RMSprop', type=str)
     parser.add_argument('--learning_rate', default=0.01, type=float)
     parser.add_argument('--learning_rate_decay', default=0.5, type=float)
@@ -88,18 +87,23 @@ if __name__ == '__main__':
         lr_decay=args.learning_rate_decay, start_decay_at=args.start_decay_at)
     criterion = nn.CrossEntropyLoss()
 
-    try:
-        start = time.time()
-        test_ppl = u.train_model(
-            model, train, valid, test, optim, args.epochs, criterion, d,
-            gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
-            checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
-    except (EarlyStoppingException, KeyboardInterrupt) as e:
-        pass
-    finally:
-        test_ppl = math.exp(u.validate_model(model, test, criterion))
+    datasets = {"train": train, "test": test, "valid": valid}
+    trainer = LMTrainer(model, datasets, criterion, optim)
+
+    if args.early_stopping > 0:
+        early_stopping = EarlyStopping(args.early_stopping)
+    model_check_hook = make_model_check_hook(
+        args.gpu, early_stopping=early_stopping)
+    num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
+    trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
+
+    trainer.add_loggers(Logger())
+
+    trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)
+
+    if args.save:
+        test_ppl = trainer.validate_model(test=True)
         print("Test perplexity: %g" % test_ppl)
-        print("Trained for [%d] secs" % (time.time() - start))
         if args.save:
             f = '{prefix}.{cell}.{layers}l.{hid_dim}h.{emb_dim}e.{bptt}b.{ppl}'
             fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
