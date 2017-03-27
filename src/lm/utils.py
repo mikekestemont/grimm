@@ -246,7 +246,6 @@ def validate_model(model, data, criterion, subset=None, reset_hidden=False):
             source, targets = data[i]
             output, hidden = model(source, hidden=hidden)
             # since loss is averaged across observations for each minibatch
-        output = output.view(-1, output.size(2))
         loss += len(source) * criterion(output, targets).data[0]
         num_words += len(source)
         if reset_hidden:
@@ -274,7 +273,6 @@ def train_epoch(model, data, optim, criterion, epoch, checkpoint,
         else:
             source, targets = data[i]
             output, hidden = model(source, hidden=hidden)
-        output = output.view(-1, output.size(2))
         loss = criterion(output, targets)
         if reset_hidden:
             hidden.data.zero_()

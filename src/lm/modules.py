@@ -197,7 +197,6 @@ class LM(nn.Module):
             prev = Variable(
                 beam.get_current_state().unsqueeze(0), volatile=True)
             outs, hidden = self(prev, hidden=hidden, **kwargs)
-            outs = outs.view(-1, outs.size(2))  # collapse batch dimension
             logs = F.log_softmax(outs)
             beam.advance(logs.data)
             if self.cell.startswith('LSTM'):
@@ -216,7 +215,6 @@ class LM(nn.Module):
         hidden, hyp, scores = None, [], []
         for _ in range(max_seq_len):
             outs, hidden = self(prev, hidden=hidden, **kwargs)
-            outs = outs.squeeze(0)  # remove batch dim
             outs = F.log_softmax(outs)
             best_score, prev = outs.max(1)
             prev = prev.t()
@@ -232,7 +230,6 @@ class LM(nn.Module):
         if gpu:
             inp_vec.cuda()
         outs, hidden = self(inp_vec, **kwargs)
-        outs = outs.squeeze(0)  # remove batch dim
         outs = u.select_cols(F.log_softmax(outs), inp).sum()
         return outs.data[0] / len(inp)
 
@@ -244,9 +241,8 @@ class LM(nn.Module):
         if self.has_dropout:
             outs = F.dropout(outs, p=self.dropout, training=self.training)
         seq_len, batch, hid_dim = outs.size()
-        # (seq_len x batch x hid) -> (seq_len * batch x hid)
         outs = self.project(outs.view(seq_len * batch, hid_dim))
-        return outs.view(seq_len, batch, outs.size(1)), hidden
+        return outs, hidden
 
 
 class ForkableLM(LM):
@@ -332,7 +328,7 @@ class MultiheadLM(LM):
         seq_len, batch, hid_dim = outs.size()
         # (seq_len x batch x hid) -> (seq_len * batch x hid)
         outs = self.project[head](outs.view(seq_len * batch, hid_dim))
-        return outs.view(seq_len, batch, outs.size(1)), hidden
+        return outs, hidden
 
     @classmethod
     def from_pretrained_model(cls, that_model, heads, **kwargs):
