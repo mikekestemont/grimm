@@ -20,7 +20,8 @@ import torch.nn as nn
 from modules import ForkableLM, MultiheadLM, LMContainer
 from optimizer import Optimizer
 from dataset import Dict, CyclicBlockDataset
-from early_stopping import EarlyStoppingException
+from trainer import LMTrainer, Logger
+from early_stopping import EarlyStoppingException, EarlyStopping
 import utils as u
 
 
@@ -107,18 +108,19 @@ if __name__ == '__main__':
 
     print('Building model...')
 
-    opts = {"num_layers": args.layers, "dropout": args.dropout,
-            "tie_weights": args.tie_weights,
-            "project_on_tied_weights": args.project_on_tied_weights,
-            "heads": ('W', 'J')}
+    heads = ('W', 'J')
 
     if args.pretrained:
         assert args.model_path, "Needs model path for loading pretrained model"
         pretrained = u.load_model(args.model_path)
-        model = MultiheadLM.from_pretrained_model(pretrained, opts['heads'])
+        model = MultiheadLM.from_pretrained_model(pretrained, heads)
     else:
         model = MultiheadLM(
-            len(d), args.emb_dim, args.hid_dim, cell=args.cell, **opts)
+            len(d), args.emb_dim, args.hid_dim, cell=args.cell,
+            num_layers=args.layers, dropout=args.dropout,
+            tie_weights=args.tie_weights,
+            project_on_tied_weights=args.project_on_tied_weights,
+            heads=('W', 'J'))
 
     model.apply(u.make_initializer())
 
@@ -136,28 +138,59 @@ if __name__ == '__main__':
         lr_decay=args.learning_rate_decay, start_decay_at=args.start_decay_at)
     criterion = nn.CrossEntropyLoss()
 
-    try:
-        start = time.time()
-        u.train_model(
-            model, train, valid, test, optim, args.epochs, criterion, d,
-            gpu=args.gpu, early_stop=args.early_stop, hook=args.hook,
-            checkpoint=args.checkpoint, reset_hidden=args.reset_hidden)
-    except EarlyStoppingException as e:
-        print(e.message, e.data['smallest'])
-    except KeyboardInterrupt:
-        print("Interrupted")
-    finally:
-        print("Trained for [%d] secs" % (time.time() - start))
-        test_ppl = math.exp(u.validate_model(model, test, criterion))
-        print("Test perplexity: %g" % test_ppl)
-        if args.save:
-            parent = '.'.join(os.path.basename(args.model_path).split('.')[:-1])
-            if args.pretrained:
-                f = '{prefix}.{parent}'.format(
-                    prefix=args.prefix, parent=parent)
-            else:
-                f = '{prefix}.{cell}.{layers}l.{hid_dim}' + \
-                    'h.{emb_dim}e.{bptt}b.{ppl}'
-            fname = f.format(ppl="%.2f" % test_ppl, **vars(args))
-            print("Saving model to [%s]..." % fname)
-            lm = LMContainer(trained_models, d).to_disk(fname)
+    class Trainer(LMTrainer):
+        def on_test_end(self, loss):
+            super(Trainer, self).on_test_end(loss)
+            if args.save:
+                parent =\
+                    '.'.join(os.path.basename(args.model_path).split('.')[:-1])
+                if args.pretrained:
+                    f = '{prefix}.{parent}'.format(
+                        prefix=args.prefix, parent=parent)
+                else:
+                    f = '{prefix}.{cell}.{layers}l.{hid_dim}' + \
+                        'h.{emb_dim}e.{bptt}b.{ppl}'
+                fname = f.format(ppl="%.2f" % loss, **vars(args))
+                print("Saving model to [%s]..." % fname)
+                LMContainer(model, d).to_disk(fname)
+
+    datasets = {'train': train, 'valid': valid, 'test': test}
+    trainer = Trainer(model, datasets, criterion, optim)
+
+    if args.early_stop > 0:
+        early_stopping = EarlyStopping(args.early_stop)
+
+    def model_check_hook(trainer, batch_num, checkpoint):
+        print("Checking training...")
+        loss = trainer.validate_model()
+        print("Valid loss: %g" % loss)
+        print("Registering early stopping loss...")
+        if args.early_stop > 0:
+            try:
+                early_stopping.add_checkpoint(loss)
+            except EarlyStoppingException as e:
+                m = "%s. Best valid loss: %g" % (e.message, e.data['smallest'])
+                trainer.log("info", {"message": m})
+                raise e
+        print("Generating text...")
+        print("***")
+        if isinstance(trainer.datasets["train"], CyclicBlockDataset):
+            for head in trainer.datasets["train"].names:
+                scores, hyps = trainer.model.generate_beam(
+                    d.get_bos(), d.get_eos(),
+                    head=head, gpu=args.gpu, max_seq_len=100)
+                print(' * [%s]' % head)
+                u.print_hypotheses(scores, hyps, d)
+        else:
+            scores, hyps = model.generate_beam(
+                d.get_bos(), d.get_eos(), gpu=args.gpu, max_seq_len=100)
+            u.print_hypotheses(scores, hyps, d)
+        print("***")
+
+    checkpoints_per_epoch = 5
+    num_checkpoints = len(train) // (args.checkpoint * checkpoints_per_epoch)
+    trainer.add_hook(model_check_hook, num_checkpoints=num_checkpoints)
+
+    trainer.add_loggers(Logger())
+
+    trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)

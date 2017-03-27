@@ -3,6 +3,7 @@ import time
 import math
 import torch
 from torch.autograd import Variable
+from dataset import CyclicBlockDataset
 from early_stopping import EarlyStopping, EarlyStoppingException
 
 
@@ -13,20 +14,6 @@ def repackage_hidden(h):
     else:
         return tuple(repackage_hidden(v) for v in h)
 
-# Hooks
-def make_early_stopping_hook(maxsize):
-    early_stopping = EarlyStopping(maxsize)
-
-    def hook(trainer, batch_num, checkpoint):
-        loss = trainer.validate_model()
-        try:
-            early_stopping.add_checkpoint(loss.data[0])
-        except EarlyStoppingException as e:
-            trainer.log("early_stopping", e, verbose=trainer.verbose)
-            raise e
-
-    return hook
-
 
 # Loggers
 class Logger(object):
@@ -35,31 +22,44 @@ class Logger(object):
         print("Starting epoch [%d]" % payload['epoch'])
 
     @staticmethod
-    def epoch_end(epoch, payload):
-        print("Epoch [%d], train loss: %g. Took: %ds" %
-              (payload['epoch'], payload["loss"], payload["duration"]))
+    def epoch_end(payload):
+        tokens_sec = payload["examples"] / payload["duration"]
+        print("Epoch [%d], train loss: %g, processed: %d tokens/sec" %
+              (payload['epoch'], payload["loss"], tokens_sec))
 
     @staticmethod
     def validation_end(payload):
-        print("Epoch [%d], valid loss: %g" % (payload['epoch'], payload['loss']))
+        print("Epoch [%d], valid loss: %g" %
+              (payload['epoch'], payload['loss']))
+
+    @staticmethod
+    def test_begin(payload):
+        print("Testing...")
 
     @staticmethod
     def test_end(payload):
         print("Test loss: %g" % payload["loss"])
 
     @staticmethod
-    def early_stopping(payload):
-        print("Early stopping: [%s]. Smallest valid loss [%g]" %
-              (payload.message, payload.data['smallest']))
-        
+    def checkpoint(payload):
+        tokens_sec = payload["examples"] / payload["duration"]
+        print("Batch [%d/%d], loss: %g, processed %d tokens/sec" %
+              (payload["batch"], payload["total_batches"],
+               payload["loss"], tokens_sec))
+
+    @staticmethod
+    def info(payload):
+        print("INFO: %s" % payload["message"])
+
     def log(self, event, payload, verbose=True):
-        if verbose:
+        if verbose and hasattr(self, event):
             getattr(self, event)(payload)
 
 
 # Base Trainer class
 class Trainer(object):
-    def __init__(self, model, datasets, criterion, optimizer, verbose=True):
+    def __init__(self, model, datasets, criterion, optimizer,
+                 test_name='test', valid_name='valid', verbose=True):
         # attributes
         self.model = model
         self.datasets = datasets   # is a dict with at least a 'train' entry
@@ -70,18 +70,10 @@ class Trainer(object):
         # containers
         self.hooks = []
         self.loggers = []
-        self.batch_state = {}  # instance variable to share state across batches
+        self.batch_state = {}  # instance var to share state across batches
         # properties
-        self.test_name = 'test'
-        self.valid_name = 'valid'
-
-    @property
-    def test_name(self):
-        return self.test_name
-
-    @property
-    def valid_name(self):
-        return self.valid_name
+        self.test_name = test_name
+        self.valid_name = valid_name
 
     # logging
     def add_loggers(self, *loggers):
@@ -92,39 +84,41 @@ class Trainer(object):
         for logger in self.loggers:
             logger.log(event, payload, verbose=self.verbose)
 
-    def on_epoch_begin(self, epoch):
-        self.log("epoch_begin", {"epoch": epoch})
-
-    def on_epoch_end(self, epoch, loss, duration):
-        self.log("epoch_end", {"epoch": epoch,
-                               "loss": self.format_loss(loss),
-                               "duration": duration})
-
-    def on_validation_end(self, epoch, loss):
-        self.log("validation_end", {"epoch": epoch, "loss": self.format_loss(loss)})
-
-    def on_test_end(self, loss):
-        self.log("test_end", {"loss": self.format_loss(loss)})
-
     # hooks
-    def add_hooks(self, hook, num_checkpoints=1):
-        self.hooks.add({'hook': hook, 'num_checkpoints': num_checkpoints})
+    def add_hook(self, hook, num_checkpoints=1):
+        self.hooks.append({'hook': hook, 'num_checkpoints': num_checkpoints})
 
     def run_hooks(self, batch_num, checkpoint):
         for hook in self.hooks:
-            checkpoint = (batch_num // checkpoint)
-            if checkpoint % hook['num_checkpoints'] == 0:
-                hook['hook'](self, batch_num, checkpoint)
+            num_checkpoints = batch_num // checkpoint
+            if num_checkpoints % hook['num_checkpoints'] == 0:
+                hook['hook'](self, batch_num, num_checkpoints)
 
-    # reporting
+    # callbacks
+    def on_batch_end(self, batch, batch_loss):
+        # reset hidden, and things like that
+        pass
+
+    def on_epoch_begin(self, epoch):
+        self.log("epoch_begin", {"epoch": epoch})
+
+    def on_epoch_end(self, epoch, loss, num_examples, duration):
+        self.log("epoch_end", {"epoch": epoch,
+                               "loss": loss,
+                               "examples": num_examples,
+                               "duration": duration})
+
+    def on_validation_end(self, epoch, loss):
+        self.log("validation_end", {"epoch": epoch, "loss": loss})
+
+    def on_test_begin(self, epoch):
+        self.log("test_begin", {"epoch": epoch})
+
+    def on_test_end(self, loss):
+        self.log("test_end", {"loss": loss})
+
     def format_loss(self, loss):
         return loss
-
-    def num_batch_examples(self, batch_data):
-        """
-        By default consider all elements in batch tensor.
-        """
-        return batch_data.n_element()
 
     # optimizer
     def zero_grad(self):
@@ -142,84 +136,98 @@ class Trainer(object):
             self.optimizer.step()
 
     # training code
-    def on_batch_end(self, batch, batch_loss):
-        # reset hidden, and things like that
-        pass
+    def num_batch_examples(self, batch_data):
+        """
+        By default consider all elements in batch tensor.
+        """
+        return batch_data.n_element()
 
-    def validate_model(self, **kwargs):
-        loss, num_words = 0, 0
-        dataset = self.datasets[self.get_valid_name()]
-        for batch in range(len(dataset)):
-            loss += self.run_batch(
-                batch, dataset=self.get_valid_name(), **kwargs)
-            num_words += self.num_batch_examples(dataset[batch])
-        return loss.data[0] / num_words
+    def validate_model(self, test=False, **kwargs):
+        self.model.eval()
+        loss, num_examples = 0, 0
+        dataset = self.datasets[self.test_name if test else self.valid_name]
+        for batch_num in range(len(dataset)):
+            batch = dataset[batch_num]
+            loss += self.num_batch_examples(batch) * self.run_batch(
+                batch, dataset=self.valid_name, **kwargs)
+            num_examples += self.num_batch_examples(batch)
+        self.model.train()
+        return self.format_loss(loss.data[0] / num_examples)
 
-    def run_batch(self, batch, dataset='train', **kwargs):
+    def run_batch(self, batch_data, dataset='train', **kwargs):
         """
         Method in charge of computing batch loss and (eventually)
         running optimizations on the model. It should return the
         loss in torch tensor form.
         """
-        source, targets = self.datasets[dataset][batch]
+        source, targets = batch_data
         outs = self.model(source, targets)
         loss = self.criterion(outs, targets)
         if dataset == 'train':
             loss.backward(), self.optimizer_step()
         return loss
 
-    def train_epoch(self, epoch, checkpoint=1, shuffle=False, **kwargs):
+    def train_epoch(self, epoch, checkpoint=None, shuffle=False, **kwargs):
         # compute batch order
-        batch_order = range(len(self.datasets['train']))
+        dataset = self.datasets['train']
+        batch_order = range(len(dataset))
         if shuffle:
             batch_order = np.random.permutation(batch_order)
         start = time.time()
-        epoch_loss, checkpoint_loss, epoch_words, checkpoint_words = 0, 0, 0, 0
+        epoch_loss, check_loss, epoch_examples, check_examples = 0, 0, 0, 0
         for batch_num, batch in enumerate(batch_order):
             self.zero_grad()
             # TODO: loss might be complex (perhaps use np.array?)
-            loss = self.run_batch(batch, dataset='train', **kwargs)
-            self.on_batch_end(batch, loss)
+            batch_data = dataset[batch]
+            loss = self.run_batch(batch_data, dataset='train', **kwargs)
+            if loss is None:  # to skip a batch run_batch might return None
+                continue
+            self.on_batch_end(batch, self.format_loss(loss.data[0]))
             # report
-            num_examples = self.num_batch_examples(self.datasets['train'][batch])
-            epoch_loss += num_examples * loss.data[0]  # dependent on loss being
-            report_loss += num_examples * loss.data[0]  # averaged: `size_average`
-            epoch_words += num_examples
-            report_words += num_examples
+            num_examples = self.num_batch_examples(batch_data)
+            # depending on loss being averaged. See `size_average`.
+            epoch_loss += num_examples * loss.data[0]
+            check_loss += num_examples * loss.data[0]
+            epoch_examples += num_examples
+            check_examples += num_examples
             # checkpoint
-            if batch_num > 0 and batch_num % checkpoint == 0:
+            if checkpoint and batch_num > 0 and batch_num % checkpoint == 0:
                 self.log('checkpoint', {
                     'batch': batch_num,
                     'total_batches': len(batch_order),
-                    'examples': num_examples,
+                    'examples': check_examples,
                     'duration': time.time() - start,
-                    'loss': self.format_loss(report_loss / report_words)})
-                report_loss, report_words, start = 0, 0, time.time()
-                # run hooks after checkpoint
+                    'loss': self.format_loss(check_loss / check_examples)})
                 self.run_hooks(batch_num, checkpoint)
-        return epoch_loss / epoch_words
+                check_loss, check_examples, start = 0, 0, time.time()
+        return epoch_loss, epoch_examples
 
-    def train(self, epochs, checkpoint, gpu=False, early_stop=0, **kwargs):
+    def train(self, epochs, checkpoint, gpu=False, **kwargs):
         for epoch in range(1, epochs + 1):
             start = time.time()
             self.on_epoch_begin(epoch)
             try:  # TODO: EarlyStopping might come from train or valid
                 # train
                 self.model.train()
-                train_loss = self.train_epoch(epoch, checkpoint, **kwargs)
+                epoch_loss, epoch_examples = self.train_epoch(
+                    epoch, checkpoint, **kwargs)
+                epoch_loss = self.format_loss(epoch_loss / epoch_examples)
                 epoch_time = time.time() - start
                 # valid
-                if self.get_valid_name() in self.datasets:
-                    self.model.eval()
+                if self.valid_name in self.datasets:
                     valid_loss = self.validate_model(**kwargs)
                     self.on_validation_end(epoch, valid_loss)
-                self.on_epoch_end(epoch, train_loss, epoch_time)
+                self.on_epoch_end(
+                    epoch, epoch_loss, epoch_examples, epoch_time)
             except EarlyStoppingException:
                 break  # go to test on early stopping
+            except KeyboardInterrupt:
+                self.log("info", {"message": "Training interrupted"})
+                break
         # test
-        if self.get_test_name() in self.datasets:
-            self.model.eval()
-            test_loss = self.validate_model(**kwargs)
+        if self.test_name in self.datasets:
+            self.on_test_begin(epoch)
+            test_loss = self.validate_model(test=True, **kwargs)
             self.on_test_end(test_loss)
 
 
@@ -230,19 +238,19 @@ class LMTrainer(Trainer):
         """
         return math.exp(min(loss, 100))
 
-    def run_batch(self, batch, dataset='train', subset=None, **kwargs):
+    def run_batch(self, batch_data, dataset='train', subset=None, **kwargs):
         # get dataset
         data = self.datasets[dataset]
         # compute loss
         if isinstance(data, CyclicBlockDataset):
-            source, targets, head = data[batch]
+            source, targets, head = batch_data
             if subset is not None and subset != head:
                 # if subset is given, skip all other subsets
-                continue
+                return          # skip batch
             hidden = self.batch_state.get('hidden', {}).get(head, None)
             output, hidden = self.model(source, hidden=hidden, head=head)
         else:
-            source, targets = data[batch]
+            source, targets = batch_data
             hidden = self.batch_state.get('hidden', None)
             output, hidden = self.model(source, hidden=hidden)
         loss = self.criterion(output, targets)
@@ -251,7 +259,7 @@ class LMTrainer(Trainer):
             loss.backward(), self.optimizer_step()
         # update hidden state (dettaching from graph)
         if isinstance(data, CyclicBlockDataset):
-            if not self.batch_state['hidden']:
+            if 'hidden' not in self.batch_state:
                 self.batch_state['hidden'] = {}
             self.batch_state['hidden'][head] = repackage_hidden(hidden)
         else:
@@ -259,7 +267,7 @@ class LMTrainer(Trainer):
         return loss
 
     def on_batch_end(self, batch, loss):
-        if getattr(self, 'reset_hidden'):
+        if hasattr(self, 'reset_hidden'):
             if isinstance(next(self.datasets.values()), CyclicBlockDataset):
                 for v in self.batch_state['hidden'].values():
                     v.zero_()
