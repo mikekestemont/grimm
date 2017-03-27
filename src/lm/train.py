@@ -23,7 +23,7 @@ from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
 import utils as u                                                 # nopep8
 
 
-def make_model_check_hook(gpu, early_stopping):
+def make_model_check_hook(d, gpu, early_stopping):
 
     def hook(trainer, batch_num, checkpoint):
         print("Checking training...")
@@ -72,6 +72,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=200, type=int)
     parser.add_argument('--bptt', default=10, type=int)
     parser.add_argument('--reset_hidden', action='store_true')
+    parser.add_argument('--use_preprocessor', action='store_true')
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--checkpoint', default=50, type=int)
     parser.add_argument('--checkpoints_per_epoch', default=5, type=int)
@@ -89,7 +90,10 @@ if __name__ == '__main__':
     print('Loading data...')
 
     sys.path.append('../')
-    from src.utils import filter_letters, load_letters, split, letters2lines
+    from src.utils import filter_letters, load_letters, \
+        split, letters2lines, make_preprocessor
+
+    preprocessor = make_preprocessor() if args.use_preprocessor else None
 
     def load_files(**kwargs):
         bpath = os.path.expanduser(args.path)
@@ -105,9 +109,11 @@ if __name__ == '__main__':
 
     if args.already_split:      # fetch already splitted datasets
         train_J, train_W = load_files(subset='train/', start_from_line=0)
-        train_J, train_W = letters2lines(train_J), letters2lines(train_W)
+        train_J = letters2lines(train_J, preprocessor=preprocessor)
+        train_W = letters2lines(train_W, preprocessor=preprocessor)
         test_J, test_W = load_files(subset='test/', start_from_line=0)
-        test_J, test_W = letters2lines(test_J), letters2lines(test_W)
+        test_J = letters2lines(test_J, preprocessor=preprocessor)
+        test_W = letters2lines(test_W, preprocessor=preprocessor)
         if not d.fitted:
             d.fit(train_J, train_W)
         test = CyclicBlockDataset(
@@ -118,7 +124,8 @@ if __name__ == '__main__':
             gpu=args.gpu).splits(test=0.1, dev=None)
     else:                       # fetch raw datasets computing splits
         J, W = load_files()
-        J, W = letters2lines(J), letters2lines(W)
+        J = letters2lines(J, preprocessor=preprocessor)
+        W = letters2lines(W, preprocessor=preprocessor)
         if not d.fitted:
             d.fit(J, W)
         train, test, valid = CyclicBlockDataset(
@@ -148,6 +155,9 @@ if __name__ == '__main__':
 
     model.apply(u.make_initializer())
 
+    if args.gpu:
+        model.cuda()
+
     if args.freeze_rnn:
         model.freeze_submodule('rnn')
     if args.freeze_emb:
@@ -168,7 +178,7 @@ if __name__ == '__main__':
     if args.early_stopping > 0:
         early_stopping = EarlyStopping(args.early_stopping)
     model_check_hook = make_model_check_hook(
-        args.gpu, early_stopping=early_stopping)
+        d, args.gpu, early_stopping=early_stopping)
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 

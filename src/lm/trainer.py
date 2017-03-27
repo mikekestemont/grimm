@@ -220,8 +220,8 @@ class Trainer(object):
                 self.on_epoch_end(
                     epoch, epoch_loss, epoch_examples, epoch_time)
             except EarlyStoppingException as e:
-                m = "%s. Best valid loss: %g" % (e.message, e.data['smallest'])
-                self.log("info", {"message": m})
+                message, _ = e.args
+                self.log("info", {"message": message})
                 break
             except KeyboardInterrupt:
                 self.log("info", {"message": "Training interrupted"})
@@ -251,21 +251,20 @@ class LMTrainer(Trainer):
                 return          # skip batch
             hidden = self.batch_state.get('hidden', {}).get(head, None)
             output, hidden = self.model(source, hidden=hidden, head=head)
-        else:
-            source, targets = batch_data
-            hidden = self.batch_state.get('hidden', None)
-            output, hidden = self.model(source, hidden=hidden)
-        loss = self.criterion(output, targets)
-        # optimize
-        if dataset == 'train':
-            loss.backward(), self.optimizer_step()
-        # update hidden state (dettaching from graph)
-        if isinstance(data, CyclicBlockDataset):
+            # dettach hidden from graph
             if 'hidden' not in self.batch_state:
                 self.batch_state['hidden'] = {}
             self.batch_state['hidden'][head] = repackage_hidden(hidden)
         else:
+            source, targets = batch_data
+            hidden = self.batch_state.get('hidden', None)
+            output, hidden = self.model(source, hidden=hidden)
+            # detach hidden from graph
             self.batch_state['hidden'] = repackage_hidden(hidden)
+        loss = self.criterion(output, targets)
+        # optimize
+        if dataset == 'train':
+            loss.backward(), self.optimizer_step()
         return loss
 
     def on_batch_end(self, batch, loss):

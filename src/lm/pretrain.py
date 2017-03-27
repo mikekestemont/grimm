@@ -42,6 +42,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', default=50, type=int)
     parser.add_argument('--checkpoints_per_epoch', default=5, type=int)
     parser.add_argument('--early_stopping', default=10, type=int)
+    parser.add_argument('--use_preprocessor', action='store_true')
     parser.add_argument('--optim', default='RMSprop', type=str)
     parser.add_argument('--learning_rate', default=0.01, type=float)
     parser.add_argument('--learning_rate_decay', default=0.5, type=float)
@@ -53,12 +54,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     sys.path.append('../')
-    from src.utils import load_letters, letters2lines
+    from src.utils import load_letters, letters2lines, make_preprocessor
 
     print("Loading data...")
     letters = load_letters(
         bpath=os.path.expanduser(args.path), subset='', start_from_line=0)
-    lines = letters2lines(letters)
+    preprocessor = make_preprocessor() if args.use_preprocessor else None
+    lines = letters2lines(letters, preprocessor=preprocessor)
     d = Dict(max_size=args.max_size, min_freq=args.min_freq,
              bos_token=u.BOS, eos_token=u.EOS)
     d.fit(lines)
@@ -77,6 +79,8 @@ if __name__ == '__main__':
                num_layers=args.layers, dropout=args.dropout)
 
     model.apply(u.make_initializer())
+    if args.gpu:
+        model.cuda()
 
     print(model)
     print(" * number of model parameters. %d" % model.n_params())
@@ -93,7 +97,7 @@ if __name__ == '__main__':
     if args.early_stopping > 0:
         early_stopping = EarlyStopping(args.early_stopping)
     model_check_hook = make_model_check_hook(
-        args.gpu, early_stopping=early_stopping)
+        d, args.gpu, early_stopping=early_stopping)
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 
