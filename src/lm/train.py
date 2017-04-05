@@ -28,7 +28,7 @@ import utils as u                             # nopep8
 def print_hypotheses(scores, hyps, d):
     for idx, (score, hyp) in enumerate(zip(scores, hyps)):
         sent = ''.join([d.vocab[c] for c in hyp])
-        print('* [Hyp %d; score: %.3f; %s' % (idx + 1, score / len(hyp), sent))
+        print('[Hyp %d; score: %.3f]: %s' % (idx + 1, score / len(hyp), sent))
 
 
 def make_model_check_hook(d, gpu, early_stopping):
@@ -40,19 +40,18 @@ def make_model_check_hook(d, gpu, early_stopping):
         print("Registering early stopping loss...")
         if early_stopping is not None:
             early_stopping.add_checkpoint(loss)
-        print("Generating text...\n***")
+        print("Generating text...")
         if isinstance(trainer.datasets["train"], CyclicBlockDataset):
             for head in trainer.datasets["train"].names:
                 scores, hyps = trainer.model.generate_beam(
                     d.get_bos(), d.get_eos(),
                     head=head, gpu=gpu, max_seq_len=100)
-                print(' * [%s]' % head)
+                print('Head: %s' % head)
                 print_hypotheses(scores, hyps, d)
         else:
             scores, hyps = trainer.model.generate_beam(
                 d.get_bos(), d.get_eos(), gpu=gpu, max_seq_len=100)
             print_hypotheses(scores, hyps, d)
-        print("***")
 
     return hook
 
