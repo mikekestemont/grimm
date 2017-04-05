@@ -15,36 +15,43 @@ torch.manual_seed(seed)
 
 import torch.nn as nn           # nopep8
 
-from modules import MultiheadLM, LMContainer  # nopep8
+from lm import MultiheadLM                   # nopep8
+from container import LMContainer            # nopep8
 from optimizer import Optimizer               # nopep8
 from dataset import Dict, CyclicBlockDataset  # nopep8
-from trainer import LMTrainer, Logger         # nopep8
-from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
-import utils as u                                                 # nopep8
+from trainer import LMTrainer                 # nopep8
+from loggers import StdLogger                 # nopep8
+from early_stopping import EarlyStopping      # nopep8
+import utils as u                             # nopep8
+
+
+def print_hypotheses(scores, hyps, d):
+    for idx, (score, hyp) in enumerate(zip(scores, hyps)):
+        sent = ''.join([d.vocab[c] for c in hyp])
+        print('* [Hyp %d; score: %.3f; %s' % (idx + 1, score / len(hyp), sent))
 
 
 def make_model_check_hook(d, gpu, early_stopping):
 
-    def hook(trainer, batch_num, checkpoint):
-        print("Checking training...")
+    def hook(trainer, epoch, batch_num, checkpoint):
+        trainer.log("info", "Checking training...")
         loss = trainer.validate_model()
-        print("Valid loss: %g" % loss)
+        trainer.log("info", "Valid loss: %g" % loss)
         print("Registering early stopping loss...")
         if early_stopping is not None:
             early_stopping.add_checkpoint(loss)
-        print("Generating text...")
-        print("***")
+        print("Generating text...\n***")
         if isinstance(trainer.datasets["train"], CyclicBlockDataset):
             for head in trainer.datasets["train"].names:
                 scores, hyps = trainer.model.generate_beam(
                     d.get_bos(), d.get_eos(),
                     head=head, gpu=gpu, max_seq_len=100)
                 print(' * [%s]' % head)
-                u.print_hypotheses(scores, hyps, d)
+                print_hypotheses(scores, hyps, d)
         else:
             scores, hyps = trainer.model.generate_beam(
                 d.get_bos(), d.get_eos(), gpu=gpu, max_seq_len=100)
-            u.print_hypotheses(scores, hyps, d)
+            print_hypotheses(scores, hyps, d)
         print("***")
 
     return hook
@@ -66,6 +73,7 @@ if __name__ == '__main__':
     parser.add_argument('--cell', default='GRU')
     parser.add_argument('--emb_dim', default=16, type=int)
     parser.add_argument('--hid_dim', default=248, type=int)
+    parser.add_argument('--att_dim', default=0, type=int)
     parser.add_argument('--dropout', default=0.3, type=float)
     parser.add_argument('--tie_weights', action='store_true')
     parser.add_argument('--project_on_tied_weights', action='store_true')
@@ -75,7 +83,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_preprocessor', action='store_true')
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--checkpoint', default=50, type=int)
-    parser.add_argument('--checkpoints_per_epoch', default=5, type=int)
+    parser.add_argument('--hooks_per_epoch', default=5, type=int)
     parser.add_argument('--early_stopping', default=10, type=int)
     parser.add_argument('--optim', default='RMSprop', type=str)
     parser.add_argument('--learning_rate', default=0.01, type=float)
@@ -149,6 +157,7 @@ if __name__ == '__main__':
         model = MultiheadLM(
             len(d), args.emb_dim, args.hid_dim, cell=args.cell,
             num_layers=args.layers, dropout=args.dropout,
+            add_attn=args.att_dim > 0, att_dim=args.att_dim,
             tie_weights=args.tie_weights,
             project_on_tied_weights=args.project_on_tied_weights,
             heads=('W', 'J'))
@@ -179,10 +188,10 @@ if __name__ == '__main__':
         early_stopping = EarlyStopping(args.early_stopping)
     model_check_hook = make_model_check_hook(
         d, args.gpu, early_stopping=early_stopping)
-    num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
+    num_checks = len(train) // (args.checkpoint * args.hooks_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 
-    trainer.add_loggers(Logger())
+    trainer.add_loggers(StdLogger())
 
     trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)
 

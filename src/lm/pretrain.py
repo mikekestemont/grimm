@@ -15,13 +15,15 @@ torch.manual_seed(seed)
 
 import torch.nn as nn           # nopep8
 
-from modules import LM, LMContainer          # nopep8
-from optimizer import Optimizer              # nopep8
+from container import LMContainer                          # nopep8
+from lm import LM                                          # nopep8
+from optimizer import Optimizer                            # nopep8
 from dataset import Dict, BlockDataset, CyclicBlockDataset  # nopep8
-from trainer import LMTrainer, Logger                       # nopep8
-from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
-from train import make_model_check_hook                           # nopep8
-import utils as u                                                 # nopep8
+from trainer import LMTrainer                               # nopep8
+from loggers import StdLogger                               # nopep8
+from early_stopping import EarlyStopping                    # nopep8
+from train import make_model_check_hook                     # nopep8
+import utils as u                                           # nopep8
 
 
 if __name__ == '__main__':
@@ -101,7 +103,7 @@ if __name__ == '__main__':
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 
-    trainer.add_loggers(Logger())
+    trainer.add_loggers(StdLogger())
 
     trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)
 
