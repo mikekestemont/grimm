@@ -1,6 +1,7 @@
 
-from lm import LM, MultiheadLM
-import utils as u
+
+from modules.lm import LM, MultiheadLM
+from modules import utils as u
 
 
 class LMContainer(object):

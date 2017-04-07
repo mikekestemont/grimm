@@ -1,6 +1,5 @@
 
 import os
-import sys
 
 seed = 1001
 import random                   # nopep8
@@ -15,14 +14,24 @@ torch.manual_seed(seed)
 
 import torch.nn as nn           # nopep8
 
-from lm import MultiheadLM                   # nopep8
-from container import LMContainer            # nopep8
-from optimizer import Optimizer               # nopep8
-from dataset import Dict, CyclicBlockDataset  # nopep8
-from trainer import LMTrainer                 # nopep8
-from loggers import StdLogger                 # nopep8
-from early_stopping import EarlyStopping      # nopep8
-import utils as u                             # nopep8
+from misc.container import LMContainer            # nopep8
+from misc.optimizer import Optimizer               # nopep8
+from misc.dataset import Dict, CyclicBlockDataset  # nopep8
+from misc.trainer import LMTrainer                 # nopep8
+from misc.loggers import StdLogger                 # nopep8
+from misc.early_stopping import EarlyStopping      # nopep8
+
+from modules import utils as u      # nopep8
+from modules.lm import MultiheadLM   # nopep8
+
+from utils import filter_letters, load_letters, \
+    split, letters2lines, make_preprocessor
+
+
+def load_files(**kwargs):
+    bpath = os.path.expanduser(args.path)
+    letters = load_letters(bpath=bpath, **kwargs)
+    return split(filter_letters(letters, min_len=0))
 
 
 def print_hypotheses(scores, hyps, d):
@@ -95,17 +104,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     print('Loading data...')
-
-    sys.path.append('../')
-    from src.utils import filter_letters, load_letters, \
-        split, letters2lines, make_preprocessor
-
     preprocessor = make_preprocessor() if args.use_preprocessor else None
-
-    def load_files(**kwargs):
-        bpath = os.path.expanduser(args.path)
-        letters = load_letters(bpath=bpath, **kwargs)
-        return split(filter_letters(letters, min_len=0))
 
     if args.pretrained:
         assert args.dict_path, "Needs dict path for loading pretrained models"

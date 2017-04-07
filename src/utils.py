@@ -12,7 +12,7 @@ random.seed(1000)
 import os
 import re
 from glob import glob
-from collections import namedtuple, Counter
+from collections import namedtuple
 import shutil
 
 

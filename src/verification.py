@@ -1,11 +1,11 @@
 
 import random
-import sys
-sys.path.append('../')
 import os
+
 import numpy as np
 from sklearn.metrics import classification_report
-from src.utils import letters2lines, load_letters
+
+from utils import letters2lines, load_letters
 from container import LMContainer
 
 
