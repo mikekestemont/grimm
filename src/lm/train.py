@@ -23,7 +23,7 @@ from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
 import utils as u                                                 # nopep8
 
 
-def make_model_check_hook(d, gpu, early_stopping):
+def make_lm_check_hook(d, gpu, early_stopping):
 
     def hook(trainer, batch_num, checkpoint):
         print("Checking training...")
@@ -177,7 +177,7 @@ if __name__ == '__main__':
 
     if args.early_stopping > 0:
         early_stopping = EarlyStopping(args.early_stopping)
-    model_check_hook = make_model_check_hook(
+    model_check_hook = make_lm_check_hook(
         d, args.gpu, early_stopping=early_stopping)
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)

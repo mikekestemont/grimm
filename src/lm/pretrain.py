@@ -20,7 +20,7 @@ from optimizer import Optimizer              # nopep8
 from dataset import Dict, BlockDataset, CyclicBlockDataset  # nopep8
 from trainer import LMTrainer, Logger                       # nopep8
 from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
-from train import make_model_check_hook                           # nopep8
+from train import make_lm_check_hook                           # nopep8
 import utils as u                                                 # nopep8
 
 
@@ -86,8 +86,7 @@ if __name__ == '__main__':
     print(" * number of model parameters. %d" % model.n_params())
 
     optim = Optimizer(
-        model.parameters(), args.optim,
-        lr=args.learning_rate, max_norm=args.max_grad_norm,
+        model.parameters(), args.optim, args.learning_rate, args.max_grad_norm,
         lr_decay=args.learning_rate_decay, start_decay_at=args.start_decay_at)
     criterion = nn.CrossEntropyLoss()
 
@@ -96,7 +95,7 @@ if __name__ == '__main__':
 
     if args.early_stopping > 0:
         early_stopping = EarlyStopping(args.early_stopping)
-    model_check_hook = make_model_check_hook(
+    model_check_hook = make_lm_check_hook(
         d, args.gpu, early_stopping=early_stopping)
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
