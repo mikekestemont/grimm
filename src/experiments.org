@@ -1,0 +1,22 @@
+
+* Plain authorship attribution
+
+** LOO (one time per collection)
+
+- Baselines:
+  - linear SVM, char 3-grams
+  - burrow's delta with cosine similarity
+  - NN + BoW (eventually)
+
+* Taking into account HTR, OCR cleanliness scores
+
+** Correlation analysis between doc-cleanliness and different classifiers
+
+* Expectations
+
+- Multihead-RNN performs better than all the baselines in all three categories
+- Lower correlation with cleanliness than baselines
+
+* Data preparation
+
+** Default splits

@@ -1,7 +1,7 @@
 
 
-from modules.lm import LM, MultiheadLM
-from modules import utils as u
+from seqmod.modules.lm import LM, MultiheadLM
+from seqmod.modules import utils as u
 
 
 class LMContainer(object):

@@ -14,18 +14,18 @@ torch.manual_seed(seed)
 
 import torch.nn as nn           # nopep8
 
-from misc.container import LMContainer            # nopep8
-from misc.optimizer import Optimizer               # nopep8
-from misc.dataset import Dict, CyclicBlockDataset  # nopep8
-from misc.trainer import LMTrainer                 # nopep8
-from misc.loggers import StdLogger                 # nopep8
-from misc.early_stopping import EarlyStopping      # nopep8
+from seqmod.misc.optimizer import Optimizer               # nopep8
+from seqmod.misc.dataset import Dict, CyclicBlockDataset  # nopep8
+from seqmod.misc.trainer import LMTrainer                 # nopep8
+from seqmod.misc.loggers import StdLogger                 # nopep8
+from seqmod.misc.early_stopping import EarlyStopping      # nopep8
 
-from modules import utils as u      # nopep8
-from modules.lm import MultiheadLM   # nopep8
+from seqmod.modules import utils as u      # nopep8
+from seqmod.modules.lm import MultiheadLM   # nopep8
 
-from utils import filter_letters, load_letters, \
-    split, letters2lines, make_preprocessor
+from container import LMContainer            # nopep8
+from utils import filter_letters, load_letters  # nopep8
+from utils import split, letters2lines, make_preprocessor  # nopep8
 
 
 def load_files(**kwargs):
