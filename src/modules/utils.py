@@ -1,17 +1,10 @@
 
-import time
-import math
 from collections import OrderedDict
 from itertools import groupby
 
 import torch
 import torch.nn.init as init
 from torch.autograd import Variable
-
-from dataset import CyclicBlockDataset
-from early_stopping import EarlyStopping
-
-from torch import nn
 
 
 BOS = '<bos>'
@@ -66,6 +59,21 @@ def merge_states(state_dict1, state_dict2, merge_map):
         else:
             state_dict[target_p] = state_dict1[target_p]
     return state_dict
+
+
+def bmv(bm, v):
+    """
+    Parameters:
+    -----------
+    bm: (batch x dim1 x dim2)
+    v: (dim2)
+
+    Returns: batch-wise product of m and v (batch x dim1 x 1)
+    """
+    batch = bm.size(0)
+    # v -> (batch x dim2 x 1)
+    bv = v.unsqueeze(0).expand(batch, v.size(0)).unsqueeze(2)
+    return bm.bmm(bv)
 
 
 def tile(t, times):
@@ -186,7 +194,6 @@ def make_initializer(
         return initializer
 
 
-# Hooks
 def has_trainable_parameters(module):
     """
     Determines whether a given module has any trainable parameters at all
@@ -224,138 +231,10 @@ def make_criterion(vocab_size, mask_ids=()):
     weight = torch.ones(vocab_size)
     for mask in mask_ids:
         weight[mask] = 0
-    return nn.CrossEntropyLoss(weight=weight)
+    return torch.nn.CrossEntropyLoss(weight=weight)
 
 
-def repackage_hidden(h):
-    if type(h) == Variable:
-        return Variable(h.data)
-    else:
-        return tuple(repackage_hidden(v) for v in h)
-
-
-def validate_model(model, data, criterion, subset=None, reset_hidden=False):
-    loss, num_words, hidden = 0, 0, None
-    for i in range(len(data)):
-        if isinstance(data, CyclicBlockDataset):
-            source, targets, head = data[i]
-            if subset is not None and subset != head:
-                continue
-            output, hidden = model(source, hidden=hidden, head=head)
-        else:
-            source, targets = data[i]
-            output, hidden = model(source, hidden=hidden)
-            # since loss is averaged across observations for each minibatch
-        loss += len(source) * criterion(output, targets).data[0]
-        num_words += len(source)
-        if reset_hidden:
-            hidden.data.zero_()
-        hidden = repackage_hidden(hidden)
-    return loss / num_words
-
-
-def train_epoch(model, data, optim, criterion, epoch, checkpoint,
-                hook=0, on_hook=None, subset=None, reset_hidden=False):
-    """
-    hook: compute `on_hook` every `hook` checkpoints
-    """
-    epoch_loss, report_loss, report_words, epoch_words = 0, 0, 0, 0
-    hidden = None
-    start = time.time()
-
-    for i in range(len(data)):
-        model.zero_grad()
-        if isinstance(data, CyclicBlockDataset):
-            source, targets, head = data[i]
-            if subset is not None and subset != head:
-                continue
-            output, hidden = model(source, hidden=hidden, head=head)
-        else:
-            source, targets = data[i]
-            output, hidden = model(source, hidden=hidden)
-        loss = criterion(output, targets)
-        if reset_hidden:
-            hidden.data.zero_()
-        hidden = repackage_hidden(hidden)
-        loss.backward(), optim.step()
-        # since loss is averaged across observations for each minibatch
-        epoch_loss += len(source) * loss.data[0]
-        report_loss += len(source) * loss.data[0]
-        report_words += len(source)
-        epoch_words += len(source)
-
-        if i % checkpoint == 0 and i > 0:
-            print("Epoch %d, %5d/%5d batches; ppl: %6.2f; %3.0f tokens/s" %
-                  (epoch, i, len(data), math.exp(report_loss / report_words),
-                   report_words / (time.time() - start)))
-            report_words = report_loss = 0
-            start = time.time()
-            # call thunk every `hook` checkpoints
-            if hook and (i // checkpoint) % hook == 0:
-                if on_hook is not None:
-                    on_hook(i // checkpoint)
-    return epoch_loss / epoch_words
-
-
-def print_hypotheses(scores, hyps, d):
-    for idx, (score, hyp) in enumerate(zip(scores, hyps)):
-        print('*** Hypothesis %d' % (idx + 1))
-        print('* ' + ''.join([d.vocab[c] for c in hyp]))
-        print('* Sentence score: %g' % (score / len(hyp)))
-
-
-def train_model(model, train, valid, test, optim, epochs, criterion, d,
-                gpu=False, early_stop=5, checkpoint=50, hook=10, subset=None,
-                reset_hidden=False, max_seq_len=100):
-    if gpu:
-        criterion.cuda(), model.cuda()
-
-    early_stop = EarlyStopping(early_stop)
-
-    def on_hook(checkpoint):
-        model.eval()
-        valid_ppl = math.exp(validate_model(
-            model, valid, criterion, subset=subset, reset_hidden=reset_hidden))
-        # log checkpoint
-        print("Valid perplexity: %g" % valid_ppl)
-        # generate a sentence
-        print("Generating text...")
-        if isinstance(train, CyclicBlockDataset):
-            for head in train.names:
-                scores, hyps = model.generate_beam(
-                    d.get_bos(), d.get_eos(),
-                    gpu=gpu, head=head, max_seq_len=max_seq_len)
-                print('* [%s]: ' % head)
-                print_hypotheses(scores, hyps, d)
-        else:
-            scores, hyps = model.generate_beam(
-                d.get_bos(), d.get_eos(), gpu=gpu, max_seq_len=max_seq_len)
-            print_hypotheses(scores, hyps, d)
-        print("***")
-        # maybe decay lr
-        if optim.method == 'SGD':
-            last_lr, new_lr = optim.maybe_update_lr(checkpoint, valid_ppl)
-            if last_lr != new_lr:
-                print("Decaying lr [%f -> %f]" % (last_lr, new_lr))
-        # early stopping
-        early_stop.add_checkpoint(valid_ppl)
-        model.train()
-
-    for epoch in range(1, epochs + 1):
-        print("Starting epoch [%d]" % epoch)
-        # train
-        model.train()
-        train_loss = train_epoch(
-            model, train, optim, criterion, epoch, checkpoint,
-            hook=hook, on_hook=on_hook, subset=subset)
-        print("Train perplexity: %g" % math.exp(min(train_loss, 100)))
-        # val
-        model.eval()
-        valid_loss = validate_model(
-            model, valid, criterion, subset=subset, reset_hidden=reset_hidden)
-        print("Valid perplexity: %g" % math.exp(min(valid_loss, 100)))
-    # test
-    test_loss = validate_model(
-        model, test, criterion, subset=subset, reset_hidden=reset_hidden)
-    print("Test perplexity: %g" % math.exp(test_loss))
-    return math.exp(test_loss)
+def format_hyp(score, hyp, hyp_num, d):
+    return '\n* [{hyp}] [Score:{score:.3f}]: {sent}'.format(
+        hyp=hyp_num, score=score/len(hyp),
+        sent=' '.join([d.vocab[c] for c in hyp]))

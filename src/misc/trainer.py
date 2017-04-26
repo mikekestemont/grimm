@@ -2,9 +2,13 @@
 import time
 import math
 import torch
+import numpy as np
 from torch.autograd import Variable
-from dataset import CyclicBlockDataset
-from early_stopping import EarlyStopping, EarlyStoppingException
+
+from misc.dataset import CyclicBlockDataset
+from misc.early_stopping import EarlyStopping, EarlyStoppingException
+
+from modules import utils as u
 
 
 # Utility functions (repackage_hidden, memory effective loss, etc.)
@@ -15,51 +19,18 @@ def repackage_hidden(h):
         return tuple(repackage_hidden(v) for v in h)
 
 
-# Loggers
-class Logger(object):
-    @staticmethod
-    def epoch_begin(payload):
-        print("Starting epoch [%d]" % payload['epoch'])
-
-    @staticmethod
-    def epoch_end(payload):
-        tokens_sec = payload["examples"] / payload["duration"]
-        print("Epoch [%d], train loss: %g, processed: %d tokens/sec" %
-              (payload['epoch'], payload["loss"], tokens_sec))
-
-    @staticmethod
-    def validation_end(payload):
-        print("Epoch [%d], valid loss: %g" %
-              (payload['epoch'], payload['loss']))
-
-    @staticmethod
-    def test_begin(payload):
-        print("Testing...")
-
-    @staticmethod
-    def test_end(payload):
-        print("Test loss: %g" % payload["loss"])
-
-    @staticmethod
-    def checkpoint(payload):
-        tokens_sec = payload["examples"] / payload["duration"]
-        print("Batch [%d/%d], loss: %g, processed %d tokens/sec" %
-              (payload["batch"], payload["total_batches"],
-               payload["loss"], tokens_sec))
-
-    @staticmethod
-    def info(payload):
-        print("INFO: %s" % payload["message"])
-
-    def log(self, event, payload, verbose=True):
-        if verbose and hasattr(self, event):
-            getattr(self, event)(payload)
-
-
 # Base Trainer class
 class Trainer(object):
     def __init__(self, model, datasets, criterion, optimizer,
-                 test_name='test', valid_name='valid', verbose=True):
+                 test_name='test', valid_name='valid',
+                 size_average=True, verbose=True, loggers=None, hooks=None):
+        """
+        Parameter:
+        ==========
+        - size_average: bool,
+            whether the loss is already averaged over examples.
+            See `size_average` in the torch.nn criterion functions.
+        """
         # attributes
         self.model = model
         self.datasets = datasets   # is a dict with at least a 'train' entry
@@ -67,9 +38,19 @@ class Trainer(object):
         self.optimizer = optimizer  # might be a dict
         # config
         self.verbose = verbose
+        self.size_average = size_average
         # containers
         self.hooks = []
-        self.loggers = []
+        if hooks is not None:
+            assert isinstance(hooks, list), "hooks must be list"
+            for hook in hooks:
+                if isinstance(hook, dict):
+                    num_checkpoints = hook.get('num_checkpoints', 1)
+                    hook = hook['hook']
+                else:
+                    num_checkpoints = 1
+                self.add_hook(hook, num_checkpoints=num_checkpoints)
+        self.loggers = loggers or []
         self.batch_state = {}  # instance var to share state across batches
         # properties
         self.test_name = test_name
@@ -85,14 +66,17 @@ class Trainer(object):
             logger.log(event, payload, verbose=self.verbose)
 
     # hooks
-    def add_hook(self, hook, num_checkpoints=1):
+    def add_hook(self, hook, num_checkpoints=1, clear=False):
+        if clear:
+            self.hooks = []
         self.hooks.append({'hook': hook, 'num_checkpoints': num_checkpoints})
 
-    def run_hooks(self, batch_num, checkpoint):
+    def run_hooks(self, epoch, batch_num, checkpoint):
         for hook in self.hooks:
             num_checkpoints = batch_num // checkpoint
-            if num_checkpoints % hook['num_checkpoints'] == 0:
-                hook['hook'](self, batch_num, num_checkpoints)
+            if hook['num_checkpoints'] > 0 and \
+               num_checkpoints % hook['num_checkpoints'] == 0:
+                hook['hook'](self, epoch, batch_num, num_checkpoints)
 
     # callbacks
     def on_batch_end(self, batch, batch_loss):
@@ -138,20 +122,21 @@ class Trainer(object):
     # training code
     def num_batch_examples(self, batch_data):
         """
-        By default consider all elements in batch tensor.
+        By default consider all target elements in batch.
         """
-        return batch_data.n_element()
+        source, target = batch_data
+        return target.nelement()
 
     def validate_model(self, test=False, **kwargs):
-        self.model.eval()
         loss, num_examples = 0, 0
         dataset = self.datasets[self.test_name if test else self.valid_name]
         for batch_num in range(len(dataset)):
             batch = dataset[batch_num]
-            loss += self.num_batch_examples(batch) * self.run_batch(
+            batch_examples = self.num_batch_examples(batch)
+            num_examples += batch_examples
+            batch_loss = self.run_batch(
                 batch, dataset=self.valid_name, **kwargs)
-            num_examples += self.num_batch_examples(batch)
-        self.model.train()
+            loss += batch_loss * (batch_examples if self.size_average else 1)
         return self.format_loss(loss.data[0] / num_examples)
 
     def run_batch(self, batch_data, dataset='train', **kwargs):
@@ -161,13 +146,13 @@ class Trainer(object):
         loss in torch tensor form.
         """
         source, targets = batch_data
-        outs = self.model(source, targets)
-        loss = self.criterion(outs, targets)
+        outs = self.model(source)
+        loss = self.criterion(outs, targets.view(-1))
         if dataset == 'train':
             loss.backward(), self.optimizer_step()
         return loss
 
-    def train_epoch(self, epoch, checkpoint=None, shuffle=False, **kwargs):
+    def train_epoch(self, epoch, checkpoint, shuffle, **kwargs):
         # compute batch order
         dataset = self.datasets['train']
         batch_order = range(len(dataset))
@@ -186,48 +171,65 @@ class Trainer(object):
             # report
             num_examples = self.num_batch_examples(batch_data)
             # depending on loss being averaged. See `size_average`.
-            epoch_loss += num_examples * loss.data[0]
-            check_loss += num_examples * loss.data[0]
+            batch_loss = \
+                loss.data[0] * (num_examples if self.size_average else 1)
+            epoch_loss += batch_loss
+            check_loss += batch_loss
             epoch_examples += num_examples
             check_examples += num_examples
             # checkpoint
             if checkpoint and batch_num > 0 and batch_num % checkpoint == 0:
+                self.model.eval()
                 self.log('checkpoint', {
+                    'epoch': epoch,
                     'batch': batch_num,
                     'total_batches': len(batch_order),
                     'examples': check_examples,
                     'duration': time.time() - start,
                     'loss': self.format_loss(check_loss / check_examples)})
-                self.run_hooks(batch_num, checkpoint)
+                self.run_hooks(epoch, batch_num, checkpoint)
+                self.model.train()
                 check_loss, check_examples, start = 0, 0, time.time()
         return epoch_loss, epoch_examples
 
-    def train(self, epochs, checkpoint, gpu=False, **kwargs):
+    def train(self, epochs, checkpoint, shuffle=False, gpu=False, **kwargs):
+        """
+        Parameters:
+        ===========
+        - epochs: int
+        - checkpoint: int, log a checkpoint and hooks every x batches
+        - gpu: bool
+        """
+        start = time.time()
         for epoch in range(1, epochs + 1):
-            start = time.time()
+            start_epoch = time.time()
+            self.model.train()
             self.on_epoch_begin(epoch)
-            try:  # TODO: EarlyStopping might come from train or valid
+            try:
                 # train
-                self.model.train()
                 epoch_loss, epoch_examples = self.train_epoch(
-                    epoch, checkpoint, **kwargs)
+                    epoch, checkpoint, shuffle, **kwargs)
                 epoch_loss = self.format_loss(epoch_loss / epoch_examples)
-                epoch_time = time.time() - start
+                epoch_time = time.time() - start_epoch
                 # valid
                 if self.valid_name in self.datasets:
+                    self.model.eval()
                     valid_loss = self.validate_model(**kwargs)
                     self.on_validation_end(epoch, valid_loss)
+                    self.model.train()
                 self.on_epoch_end(
                     epoch, epoch_loss, epoch_examples, epoch_time)
             except EarlyStoppingException as e:
                 message, _ = e.args
-                self.log("info", {"message": message})
+                self.log("info", message)
                 break
             except KeyboardInterrupt:
-                self.log("info", {"message": "Training interrupted"})
+                self.log("info", "Training interrupted")
                 break
+        self.log("info", "Trained for [%.3f sec]" % (time.time() - start))
         # test
         if self.test_name in self.datasets:
+            self.model.eval()
             self.on_test_begin(epoch)
             test_loss = self.validate_model(test=True, **kwargs)
             self.on_test_end(test_loss)
@@ -250,18 +252,18 @@ class LMTrainer(Trainer):
                 # if subset is given, skip all other subsets
                 return          # skip batch
             hidden = self.batch_state.get('hidden', {}).get(head, None)
-            output, hidden = self.model(source, hidden=hidden, head=head)
-            # dettach hidden from graph
+            output, hidden, *_ = self.model(source, hidden=hidden, head=head)
             if 'hidden' not in self.batch_state:
                 self.batch_state['hidden'] = {}
+            # dettach hidden from graph
             self.batch_state['hidden'][head] = repackage_hidden(hidden)
         else:
             source, targets = batch_data
             hidden = self.batch_state.get('hidden', None)
-            output, hidden = self.model(source, hidden=hidden)
+            output, hidden, *_ = self.model(source, hidden=hidden)
             # detach hidden from graph
             self.batch_state['hidden'] = repackage_hidden(hidden)
-        loss = self.criterion(output, targets)
+        loss = self.criterion(output, targets.view(-1))
         # optimize
         if dataset == 'train':
             loss.backward(), self.optimizer_step()
@@ -277,4 +279,42 @@ class LMTrainer(Trainer):
 
     def num_batch_examples(self, batch_data):
         src, trg, *_ = batch_data
-        return len(src)
+        return len(trg)
+
+
+class EncoderDecoderTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super(EncoderDecoderTrainer, self).__init__(*args, **kwargs)
+        self.size_average = False
+
+    def format_loss(self, loss):
+        return math.exp(min(loss, 100))
+
+    def run_batch(self, batch_data, dataset='train', split_batch=52, **kwargs):
+        evaluation = dataset != 'train'
+        pad, eos = self.model.src_dict.get_pad(), self.model.src_dict.get_eos()
+        loss = 0
+        source, targets = batch_data
+        # remove <eos> from decoder targets substituting them with <pad>
+        decode_targets = Variable(u.map_index(targets[:-1].data, eos, pad))
+        # remove <bos> from loss targets
+        loss_targets = targets[1:]
+        # remove <bos> from source and compute model output
+        outs = self.model(source[1:], decode_targets)
+        # dettach outs from computational graph
+        det_outs = Variable(
+            outs.data, requires_grad=not evaluation, volatile=evaluation)
+        for out, trg in zip(
+                det_outs.split(split_batch), loss_targets.split(split_batch)):
+            loss += self.criterion(
+                self.model.project(out.view(-1, out.size(2))), trg.view(-1))
+        if not evaluation:
+            loss.div(outs.size(1)).backward()
+            grad = None if det_outs.grad is None else det_outs.grad.data
+            outs.backward(grad)
+            self.optimizer_step()
+        return loss
+
+    def num_batch_examples(self, batch_data):
+        _, targets = batch_data
+        return targets.data.ne(self.model.src_dict.get_pad()).sum()

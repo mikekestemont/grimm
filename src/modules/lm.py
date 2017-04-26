@@ -1,106 +1,86 @@
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
 import utils as u
+from custom import word_dropout
 from beam_search import Beam
 
 
-class StackedRNN(nn.Module):
-    def __init__(self, num_layers, in_dim, hid_dim, cell='LSTM', dropout=0.0):
-        self.num_layers = num_layers
-        self.in_dim = in_dim
+class Attention(nn.Module):
+    def __init__(self, att_dim, hid_dim, emb_dim):
+        self.att_dim = att_dim
         self.hid_dim = hid_dim
-        self.cell = cell
-        self.has_dropout = bool(dropout)
-        self.dropout = dropout
-        super(StackedRNN, self).__init__()
+        self.emb_dim = emb_dim
+        super(Attention, self).__init__()
+        self.hid2att = nn.Linear(hid_dim, att_dim)    # W
+        self.emb2att = nn.Linear(emb_dim, att_dim)       # U
+        self.att_v = nn.Parameter(torch.Tensor(att_dim))  # b
 
-        for i in range(self.num_layers):
-            layer = getattr(nn, cell + 'Cell')(in_dim, hid_dim)
-            self.add_module(cell + 'Cell_%d' % i, layer)
-            in_dim = hid_dim
-
-    def forward(self, inp, hidden):
+    def project_emb(self, emb):
         """
-        Parameters:
-        ==========
-        - inp: torch.Tensor (batch x inp_dim),
-            Tensor holding the target for the previous decoding step,
-            inp_dim = emb_dim or emb_dim + hid_dim if self.add_pred is True.
-        - hidden: tuple (h_c, c_0), output of previous step
-            h_c: (num_layers x batch x hid_dim)
-            n_c: (num_layers x batch x hid_dim)
-
-        Returns: output, (h_n, c_n)
-        ==========
-        - output: torch.Tensor (batch x hid_dim)
-        - h_n: torch.Tensor (num_layers x batch x hid_dim)
-        - c_n: torch.Tensor (num_layers x batch x hid_dim)
-        """
-        if self.cell.startswith('LSTM'):
-            h_0, c_0 = hidden
-            h_1, c_1 = [], []
-            for i in range(self.num_layers):
-                layer = getattr(self, self.cell + ('Cell_%d' % i))
-                h_1_i, c_1_i = layer(inp, (h_0[i], c_0[i]))
-                h_1.append(h_1_i), c_1.append(c_1_i)
-                inp = h_1_i
-                # only add dropout to hidden layer (not output)
-                if i + 1 != self.num_layers and self.has_dropout:
-                    inp = F.dropout(
-                        inp, p=self.dropout, training=self.training)
-            output, hidden = inp, (torch.stack(h_1), torch.stack(c_1))
-        else:
-            h_0, h_1 = hidden, []
-            for i in range(self.num_layers):
-                layer = getattr(self, self.cell + ('Cell_%d' % i))
-                h_1_i = layer(inp, h_0[i])
-                h_1.append(h_1_i)
-                inp = h_1_i
-                if i + 1 != self.num_layers and self.has_dropout:
-                    inp = F.dropout(
-                        inp, p=self.dropout, training=self.training)
-            output, hidden = inp, torch.stack(h_1)
-        return output, hidden
-
-
-class MaxOut(nn.Module):
-    def __init__(self, in_dim, out_dim, k):
-        """
-        Implementation of MaxOut:
-            h_i^{maxout} = max_{j \in [1, ..., k]} x^T W_{..., i, j} + b_{i, j}
-        where W is in R^{D x M x K}, D is the input size, M is the output size
-        and K is the number of pieces to max-pool from. (i.e. i ranges over M,
-        j ranges over K and ... corresponds to the input dimension)
-
-        Parameters:
-        ===========
-        - in_dim: int, Input dimension
-        - out_dim: int, Output dimension
-        - k: int, number of "pools" to max over
-
         Returns:
-        ===========
-        - out: torch.Tensor (batch x k)
+        --------
+        torch.Tensor: (seq_len x batch_size x att_dim)
         """
-        self.in_dim, self.out_dim, self.k = in_dim, out_dim, k
-        super(MaxOut, self).__init__()
-        self.projection = nn.Linear(in_dim, k * out_dim)
+        return torch.stack([self.emb2att(i) for i in emb])
 
-    def forward(self, inp):
+    def forward(self, hid, emb, emb_att=None):
         """
-        Because of the linear projection we are bound to 1-d input
-        (excluding batch-dim), therefore there is no need to generalize
-        the implementation to n-dimensional input.
+        Parameters:
+        -----------
+        hid: torch.Tensor (batch_size x hid_dim)
+            Hidden state at step h_{t-1}
+        emb: torch.Tensor (seq_len x batch_size x emb_dim)
+            Embeddings of input words up to step t-1
+
+        Returns: context, weights
+        --------
+        context: torch.Tensor (batch_size x emb_dim)
+        weights: torch.Tensor (batch_size x seq_len)
         """
-        batch, in_dim = inp.size()
-        # (batch x self.k * self.out_dim) -> (batch x self.out_dim x self.k)
-        out = self.projection(inp).view(batch, self.out_dim, self.k)
-        out, _ = out.max(2)
-        return out.squeeze(2)
+        seq_len, batch_size, _ = emb.size()
+        # hid_att: (batch_size x hid_dim)
+        hid_att = self.hid2att(hid)
+        emb_att = emb_att or self.project_emb(emb)
+        # att: (seq_len x batch_size x att_dim)
+        att = F.tanh(emb_att + u.tile(hid_att, seq_len))
+        # weights: (batch_size x seq_len)
+        weights = F.softmax(u.bmv(att.t(), self.att_v).squeeze(2))
+        # context: (batch_size x emb_dim)
+        context = weights.unsqueeze(1).bmm(emb.t()).squeeze(1)
+        return context, weights
+
+
+class AttentionalProjection(nn.Module):
+    def __init__(self, att_dim, hid_dim, emb_dim):
+        super(AttentionalProjection, self).__init__()
+        self.attn = Attention(att_dim, hid_dim, emb_dim)
+        self.hid2hid = nn.Linear(hid_dim, hid_dim)
+        self.emb2hid = nn.Linear(emb_dim, hid_dim)
+
+    def forward(self, outs, emb):
+        """
+        Runs attention for a given input sequence
+
+        Returns: output, weights
+        --------
+        output: torch.Tensor (seq_len x batch_size x hid_dim)
+        weights: list of torch.Tensor(batch_size x 0:t-1) of length seq_len
+        """
+        emb_att = self.attn.project_emb(emb)
+        output, weights = [], []
+        for idx, hid in enumerate(outs):
+            t = max(0, idx-1)  # use same hid at t=0
+            context, weight = self.attn(
+                outs[t], emb[:max(1, t)], emb_att=emb_att[:max(1, t)])
+            output.append(self.hid2hid(hid) + self.emb2hid(context))
+            weights.append(weight)
+        return torch.stack(output), weights
 
 
 class LM(nn.Module):
@@ -116,7 +96,7 @@ class LM(nn.Module):
         embedding dimensions wouldn't match and weights cannot be tied.
     - hid_dim: int, hidden dimension of the RNN.
     - num_layers: int, number of layers of the RNN.
-    - cell: str, one of GRU, LSTM.
+    - cell: str, one of GRU, LSTM, RNN.
     - bias: bool, whether to include bias in the RNN.
     - dropout: float, amount of dropout to apply in between layers.
     - tie_weights: bool, whether to tie input and output embedding layers.
@@ -126,8 +106,10 @@ class LM(nn.Module):
         inserted after the RNN to match back to the embedding dimension.
     """
     def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
-                 cell='GRU', bias=True, dropout=0.0, tie_weights=False,
-                 project_on_tied_weights=False):
+                 cell='GRU', bias=True, dropout=0.0, word_dropout=0.0,
+                 target_code=None, reserved_codes=(),
+                 add_attn=False, att_dim=None,
+                 tie_weights=False, project_on_tied_weights=False):
         self.vocab = vocab
         self.emb_dim = emb_dim
         self.hid_dim = hid_dim
@@ -142,28 +124,40 @@ class LM(nn.Module):
         self.bias = bias
         self.has_dropout = bool(dropout)
         self.dropout = dropout
-
         super(LM, self).__init__()
+
+        # word dropout
+        self.word_dropout = word_dropout
+        self.target_code = target_code
+        self.reserved_codes = reserved_codes
         # input embeddings
         self.embeddings = nn.Embedding(vocab, self.emb_dim)
         # rnn
         self.rnn = getattr(nn, cell)(
             self.emb_dim, self.hid_dim,
             num_layers=num_layers, bias=bias, dropout=dropout)
+        # attention
+        if add_attn:
+            assert self.cell == 'RNN' or self.cell == 'GRU', \
+                "currently only RNN, GRU supports attention"
+            assert att_dim is not None, "Need to specify att_dim"
+            self.att_dim = att_dim
+            self.attn = AttentionalProjection(
+                self.att_dim, self.hid_dim, self.emb_dim)
         # output embeddings
         if tie_weights:
             if self.emb_dim == self.hid_dim:
-                self.project = nn.Linear(self.hid_dim, vocab)
+                self.project = nn.Linear(self.hid_dim, self.vocab)
                 self.project.weight = self.embeddings.weight
             else:
                 assert project_on_tied_weights, \
                     "Unequal tied layer dims but no projection layer"
-                project = nn.Linear(self.emb_dim, vocab)
+                project = nn.Linear(self.emb_dim, self.vocab)
                 project.weight = self.embeddings.weight
                 self.project = nn.Sequential(
                     nn.Linear(self.hid_dim, self.emb_dim), project)
         else:
-            self.project = nn.Linear(self.hid_dim, vocab)
+            self.project = nn.Linear(self.hid_dim, self.vocab)
 
     def parameters(self):
         for p in super(LM, self).parameters():
@@ -181,22 +175,29 @@ class LM(nn.Module):
         batch = inp.size(1)
         size = (self.num_layers, batch, self.hid_dim)
         h_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
-        if self.cell.startswith('GRU'):
-            return h_0
-        else:
+        if self.cell.startswith('LSTM'):
             c_0 = Variable(inp.data.new(*size).zero_(), requires_grad=False)
             return h_0, c_0
+        else:
+            return h_0
 
     def generate_beam(
             self, bos, eos, max_seq_len=20, width=5, gpu=False, **kwargs):
-        "Generate text using beam search decoding"
+        """
+        Generate text using beam search decoding
+
+        Returns:
+        --------
+        scores: list of floats, unnormalized scores, one for each hypothesis
+        hyps: list of lists, decoded hypotheses in integer form
+        """
         self.eval()
         beam = Beam(width, bos, eos, gpu=gpu)
         hidden = None
         while beam.active and len(beam) < max_seq_len:
             prev = Variable(
                 beam.get_current_state().unsqueeze(0), volatile=True)
-            outs, hidden = self(prev, hidden=hidden, **kwargs)
+            outs, hidden, _ = self(prev, hidden=hidden, **kwargs)
             logs = F.log_softmax(outs)
             beam.advance(logs.data)
             if self.cell.startswith('LSTM'):
@@ -208,13 +209,20 @@ class LM(nn.Module):
         return scores, hyps
 
     def generate(self, bos, eos, max_seq_len=20, gpu=False, **kwargs):
-        "Generate text using simple argmax decoding"
+        """
+        Generate text using simple argmax decoding
+
+        Returns:
+        --------
+        scores: list of floats, unnormalized scores, one for each hypothesis
+        hyps: list of lists, decoded hypotheses in integer form
+        """
         self.eval()
         prev = Variable(torch.LongTensor([bos]).unsqueeze(0), volatile=True)
         if gpu: prev = prev.cuda()
         hidden, hyp, scores = None, [], []
         for _ in range(max_seq_len):
-            outs, hidden = self(prev, hidden=hidden, **kwargs)
+            outs, hidden, _ = self(prev, hidden=hidden, **kwargs)
             outs = F.log_softmax(outs)
             best_score, prev = outs.max(1)
             prev = prev.t()
@@ -222,27 +230,45 @@ class LM(nn.Module):
             scores.append(best_score.squeeze().data[0])
             if prev.data.eq(eos).nonzero().nelement() > 0:
                 break
-        return [scores], [hyp]
+        return [sum(scores)], [hyp]
 
     def predict_proba(self, inp, gpu=False, **kwargs):
         self.eval()
         inp_vec = Variable(torch.LongTensor([inp]), volatile=True)
         if gpu:
             inp_vec.cuda()
-        outs, hidden = self(inp_vec, **kwargs)
+        outs, hidden, _ = self(inp_vec, **kwargs)
         outs = u.select_cols(F.log_softmax(outs), inp).sum()
         return outs.data[0] / len(inp)
 
     def forward(self, inp, hidden=None, **kwargs):
+        """
+        Parameters:
+        -----------
+        inp: torch.Tensor (seq_len x batch_size)
+
+        Returns:
+        --------
+        outs: torch.Tensor (seq_len * batch_size x vocab)
+        hidden: see output of RNN, GRU, LSTM in torch.nn
+        weights: None or list of weights (batch_size x 0:n),
+            It will only be not None if attention is provided.
+        """
+        inp = word_dropout(
+            inp, self.target_code, dropout=self.word_dropout,
+            reserved_codes=self.reserved_codes, training=self.training)
         emb = self.embeddings(inp)
         if self.has_dropout:
             emb = F.dropout(emb, p=self.dropout, training=self.training)
         outs, hidden = self.rnn(emb, hidden or self.init_hidden_for(emb))
         if self.has_dropout:
             outs = F.dropout(outs, p=self.dropout, training=self.training)
+        weights = None
+        if hasattr(self, 'attn'):
+            outs, weights = self.attn(outs, emb)
         seq_len, batch, hid_dim = outs.size()
         outs = self.project(outs.view(seq_len * batch, hid_dim))
-        return outs, hidden
+        return outs, hidden, weights
 
 
 class ForkableLM(LM):
@@ -275,8 +301,9 @@ class ForkableLM(LM):
             if layer.startswith('project') and \
                self.tie_weights and \
                self.project_on_tied_weights:
-                print("Warning: Forked model couldn't use projection layer " +
-                      "of parent for the initialization of layer [%s]" % layer)
+                logging.warn(
+                    "Warning: Forked model couldn't use projection layer " +
+                    "of parent for the initialization of layer [%s]" % layer)
                 continue
             else:
                 target_dict[layer] = p
@@ -293,45 +320,43 @@ class MultiheadLM(LM):
     given number of heads). This allows the model to fine tune different
     output distribution on different datasets.
     """
-    def __init__(self, vocab, emb_dim, hid_dim, num_layers=1,
-                 cell='GRU', bias=True, dropout=0.0, heads=(), **kwargs):
+    def __init__(self, *args, heads=(), **kwargs):
+        super(MultiheadLM, self).__init__(*args, **kwargs)
         assert heads, "MultiheadLM requires at least 1 head but got 0"
-        self.vocab = vocab
-        self.emb_dim = emb_dim
-        self.hid_dim = hid_dim
-        self.num_layers = num_layers
-        self.cell = cell
-        self.bias = bias
-        self.has_dropout = bool(dropout)
-        self.dropout = dropout
-        self.heads = heads
-
-        super(LM, self).__init__()
-        self.embeddings = nn.Embedding(vocab, self.emb_dim)
-        self.rnn = getattr(nn, cell)(
-            self.emb_dim, self.hid_dim,
-            num_layers=num_layers, bias=bias, dropout=dropout)
+        import copy
+        if hasattr(self, 'attn'):
+            attn = self.attn
+            del self.attn
+            self.attn = {}
+        project = self.project
+        del self.project
         self.project = {}
         for head in heads:
-            module = nn.Linear(self.hid_dim, vocab)
-            self.add_module(head, module)
-            self.project[head] = module
+            project_module = copy.deepcopy(project)
+            self.add_module(head, project_module)
+            self.project[head] = project_module
+            if hasattr(self, 'attn'):
+                attn_module = copy.deepcopy(attn)
+                self.add_module(head, attn_module)
+                self.attn[head] = attn_module
 
     def forward(self, inp, hidden=None, head=None):
-        """"""
         emb = self.embeddings(inp)
         if self.has_dropout:
             emb = F.dropout(emb, p=self.dropout, training=self.training)
         outs, hidden = self.rnn(emb, hidden or self.init_hidden_for(emb))
         if self.has_dropout:
             outs = F.dropout(outs, p=self.dropout, training=self.training)
+        weights = None
+        if hasattr(self, 'attn'):
+            outs, weights = self.attn[head](outs, emb)
         seq_len, batch, hid_dim = outs.size()
         # (seq_len x batch x hid) -> (seq_len * batch x hid)
         outs = self.project[head](outs.view(seq_len * batch, hid_dim))
-        return outs, hidden
+        return outs, hidden, weights
 
     @classmethod
-    def from_pretrained_model(cls, that_model, heads, **kwargs):
+    def from_pretrained_model(cls, that_model, heads):
         """
         Create a multihead model from a pretrained LM initializing all weights
         to the LM states and all heads to the same output projection layer
@@ -342,88 +367,14 @@ class MultiheadLM(LM):
             that_model.vocab, that_model.emb_dim, that_model.hid_dim,
             num_layers=that_model.num_layers, cell=that_model.cell,
             bias=that_model.bias, dropout=that_model.dropout, heads=heads,
-            **kwargs)
+            add_attn=hasattr(that_model, 'attn'), att_dim=that_model.att_dim)
         this_state_dict = this_model.state_dict()
         for p, w in that_model.state_dict().items():
             if p in this_state_dict:
                 this_state_dict[p] = w
-            else:               # you got project layer
+            else:               # got project or attn layer
                 *_, weight = p.split('.')
                 for head in this_model.heads:
                     this_state_dict[head + "." + weight] = w
         this_model.load_state_dict(this_state_dict)
         return this_model
-
-
-class LMContainer(object):
-    def __init__(self, models, d):
-        """
-        Constructor
-
-        Parameters:
-        ===========
-        - models, a dict mapping from head names to models or a MultiheadLM
-        - d, a Dict or a dict mapping from head names to Dict's
-        """
-        self.models = models
-        self.d = d
-        if isinstance(self.models, dict):
-            for model in self.models.values():
-                assert isinstance(model, LM), "Expected LM"
-            # LM or ForkableLM models
-            self.heads = list(d.keys())
-            self.get_head = lambda head: self.models[head]
-        elif isinstance(self.models, MultiheadLM):
-            self.heads = list(models.heads)
-            self.get_head = lambda head: self.models
-        else:
-            raise ValueError("Wrong model type %s" % type(models))
-
-    def cuda(self):
-        for head in self.heads:
-            self.get_head(head).cuda()
-        return self
-
-    def cpu(self):
-        for head in self.heads:
-            self.get_head(head).cpu()
-        return self
-
-    def predict_proba(self, text, author, gpu=False):
-        if isinstance(self.d, dict):
-            d = self.d[author]
-        else:
-            d = self.d
-        inp = [c for l in d.transform(text) for c in l]
-        return self.get_head(author).predict_proba(inp, head=author)
-
-    def to_disk(self, prefix, mode='torch'):
-        self.cpu()              # always move to cpu
-        if isinstance(self.models, dict):
-            # LM models
-            for head, model in self.models.items():
-                u.save_model(prefix + '_' + head, mode=mode)
-        else:
-            u.save_model(self.models, prefix, mode=mode)
-        u.save_model(self.d, prefix + '.dict', mode=mode)
-
-    @classmethod
-    def from_disk(cls, model_path, d_path):
-        """
-        Parameters:
-        ===========
-
-        - model_path: str,
-            Path to file with serialized MultiheadLM model, or dict from
-            heads to paths with ForkableLM models.
-        - d_path: str,
-            Path to file with serialized Dict.
-        """
-        if isinstance(model_path, dict):
-            model = {}
-            for k, path in model_path.items():
-                model[k] = u.load_model(path)
-        else:
-            model = u.load_model(model_path)
-        d = u.load_model(d_path)
-        return cls(model, d)

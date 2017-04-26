@@ -1,6 +1,5 @@
 
 import os
-import sys
 
 seed = 1001
 import random                   # nopep8
@@ -13,15 +12,19 @@ except:
     print('no NVIDIA driver found')
 torch.manual_seed(seed)
 
-import torch.nn as nn           # nopep8
+import torch.nn as nn   # nopep8
 
-from modules import LM, LMContainer          # nopep8
-from optimizer import Optimizer              # nopep8
-from dataset import Dict, BlockDataset, CyclicBlockDataset  # nopep8
-from trainer import LMTrainer, Logger                       # nopep8
-from early_stopping import EarlyStoppingException, EarlyStopping  # nopep8
-from train import make_lm_check_hook                           # nopep8
-import utils as u                                                 # nopep8
+from misc.optimizer import Optimizer                            # nopep8
+from misc.dataset import Dict, BlockDataset, CyclicBlockDataset  # nopep8
+from misc.trainer import LMTrainer                               # nopep8
+from misc.loggers import StdLogger                               # nopep8
+from misc.early_stopping import EarlyStopping                    # nopep8
+
+from modules import utils as u      # nopep8
+from modules.lm import LM           # nopep8
+
+from container import LMContainer   # nopep8
+from utils import load_letters, letters2lines, make_preprocessor  # nopep8
 
 
 if __name__ == '__main__':
@@ -52,9 +55,6 @@ if __name__ == '__main__':
     parser.add_argument('--save', action='store_true')
     parser.add_argument('--prefix', default='model', type=str)
     args = parser.parse_args()
-
-    sys.path.append('../')
-    from src.utils import load_letters, letters2lines, make_preprocessor
 
     print("Loading data...")
     letters = load_letters(
@@ -100,7 +100,7 @@ if __name__ == '__main__':
     num_checks = len(train) // (args.checkpoint * args.checkpoints_per_epoch)
     trainer.add_hook(model_check_hook, num_checkpoints=num_checks)
 
-    trainer.add_loggers(Logger())
+    trainer.add_loggers(StdLogger())
 
     trainer.train(args.epochs, args.checkpoint, gpu=args.gpu)
 

@@ -1,6 +1,6 @@
 
 import random
-from collections import Counter
+from collections import Counter, Sequence
 
 import torch
 import torch.utils.data
@@ -14,7 +14,8 @@ def shuffled(data):
 
 
 def shuffle_pairs(pair1, pair2):
-    return zip(*shuffled(zip(pair1, pair2)))
+    pair1, pair2 = zip(*shuffled(zip(pair1, pair2)))
+    return list(pair1), list(pair2)
 
 
 def cumsum(seq):
@@ -30,7 +31,10 @@ def get_splits(length, test, dev=None):
     return cumsum(int(length * i) for i in [train, dev, test] if i)
 
 
-def batchify(examples, pad_token=None, align_right=False):
+def pack(examples, pad_token=None, align_right=False):
+    if pad_token is None:
+        assert all(len(examples[0]) == len(x) for x in examples), \
+            "No pad token was supported but need to pad (unequal lengths)"
     max_length = max(len(x) for x in examples)
     out = torch.LongTensor(len(examples), max_length).fill_(pad_token or 0)
     for i in range(len(examples)):
@@ -52,20 +56,38 @@ def block_batchify(vector, batch_size):
 
 
 class Dict(object):
+    """
+    Dict class to vectorize discrete data.
+
+    Parameters:
+    ===========
+    - pad_token: None or str, symbol for representing padding
+    - eos_token: None or str, symbol for representing end of line
+    - bos_token: None or str, symbol for representing begining of line
+    - unk_token: None or str, symbol for representing unknown tokens
+    - force_unk: bool, Whether to force the inclusion of the unknown symbol
+    - max_size: None or int, Maximum size of the dictionary
+    - min_freq: int, Minimum freq for a symbol to be included in the dict
+    - sequential: bool, Whether the data is sequential (this will entail
+        that eos_token and bos_token will be added to examples, unless
+        they are None).
+    """
     def __init__(self, pad_token=None, eos_token=None, bos_token=None,
-                 unk_token='<unk>', max_size=None, min_freq=1,
+                 unk_token='<unk>', force_unk=True, max_size=None, min_freq=1,
                  sequential=True):
-        """
-        Dict
-        """
         self.counter = Counter()
-        self.vocab = [t for t in [pad_token, eos_token, bos_token] if t]
         self.fitted = False
-        self.has_unk = False    # only index unk_token if needed
+        # TODO: warn if pad, eos or bos token are given and sequential is False
         self.pad_token = pad_token
         self.eos_token = eos_token
         self.bos_token = bos_token
         self.unk_token = unk_token
+        # only index unk_token if needed or requested
+        self.reserved = {t for t in [pad_token, eos_token, bos_token] if t}
+        self.has_unk = force_unk
+        if force_unk:
+            assert unk_token is not None, "<unk> token needed"
+            self.reserved.add(self.unk_token)
         self.max_size = max_size
         self.min_freq = min_freq
         self.sequential = sequential
@@ -104,13 +126,14 @@ class Dict(object):
     def partial_fit(self, *args):
         for dataset in args:
             for example in dataset:
-                self.counter.update(example if self.sequential else [example])
+                self.counter.update(example)  # example should always be a list
 
     def fit(self, *args):
         if self.fitted:
             raise ValueError('Dict is already fitted')
         self.partial_fit(*args)
         most_common = self.counter.most_common(self.max_size)
+        self.vocab = [s for s in self.reserved]
         self.vocab += [k for k, v in most_common if v >= self.min_freq]
         self.s2i = {s: i for i, s in enumerate(self.vocab)}
         self.fitted = True
@@ -123,46 +146,24 @@ class Dict(object):
             if self.sequential:
                 example = bos + [self.index(s) for s in example] + eos
             else:
-                example = self.index(example)
+                example = [self.index(s) for s in example]
             yield example
 
 
-class BatchIterator(object):
+class Dataset(Sequence, torch.utils.data.Dataset):
     """
-    BatchIterator, a class to batchify PairedDataset's
+    Abstract class wrapping torch.utils.data.Dataset
     """
-    def __init__(self, dataset, batch_size,
-                 gpu=False, align_right=False, evaluation=False):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.gpu = gpu
-        self.evaluation = evaluation
-        self.align_right = align_right
-        self.num_batches = len(dataset) // batch_size
-
-    def _batchify(self, batch_data, pad_token):
-        out = batchify(batch_data, pad_token, align_right=self.align_right)
-        if self.gpu:
-            out = out.cuda()
-        return Variable(out, volatile=self.evaluation)
-
-    def __getitem__(self, idx):
-        assert idx < self.num_batches, "%d >= %d" % (idx, self.num_batches)
-        batch_from = idx * self.batch_size
-        batch_to = (idx+1) * self.batch_size
-        src_pad = self.dataset.d['src'].get_pad()
-        trg_pad = self.dataset.d['trg'].get_pad()
-        src_batch = self._batchify(
-            self.dataset.data['src'][batch_from: batch_to], src_pad)
-        trg_batch = self._batchify(
-            self.dataset.data['trg'][batch_from: batch_to], trg_pad)
-        return src_batch, trg_batch
-
     def __len__(self):
-        return self.num_batches
+        raise NotImplementedError
 
+    def __getitem__(self):
+        raise NotImplementedError
 
-class Dataset(torch.utils.data.Dataset):
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
     @classmethod
     def from_disk(cls, path):
         with open(path, 'rb') as f:
@@ -174,7 +175,8 @@ class Dataset(torch.utils.data.Dataset):
 
 
 class PairedDataset(Dataset):
-    def __init__(self, src, trg, d, fitted=False):
+    def __init__(self, src, trg, d, batch_size=1,
+                 fitted=False, gpu=False, evaluation=False, align_right=False):
         """
         Constructs a dataset out of source and target pairs. Examples will
         be transformed into integers according to their respective Dict.
@@ -188,37 +190,52 @@ class PairedDataset(Dataset):
             src_dict: Dict instance fitted to the source data
             trg_dict: Dict instance fitted to the target data
         """
+        assert len(src) == len(trg), \
+            "Source and Target dataset must be equal length"
+        assert len(src) >= batch_size, "Empty dataset"
         self.data = {
             'src': src if fitted else list(d['src'].transform(src)),
             'trg': trg if fitted else list(d['trg'].transform(trg))}
-        assert len(src) == len(trg), \
-            "Source and Target dataset must be equal length"
         self.d = d              # fitted dicts
+        self.batch_size = batch_size
+        self.gpu = gpu
+        self.evaluation = evaluation
+        self.align_right = align_right
+        self.num_batches = len(self.data['src']) // batch_size
+
+    def _pack(self, batch_data, pad_token=None):
+        out = pack(batch_data, pad_token=pad_token, align_right=self.align_right)
+        if self.gpu:
+            out = out.cuda()
+        return Variable(out, volatile=self.evaluation)
+
+    def set_batch_size(self, new_batch_size):
+        self.batch_size = new_batch_size
+        self.num_batches = len(self.data['src']) // self.batch_size
+
+    def set_gpu(self, new_gpu):
+        self.gpu = new_gpu
 
     def __len__(self):
-        return len(self.data['src'])
+        return self.num_batches
+
+    def __getitem__(self, idx):
+        assert idx < self.num_batches, "%d >= %d" % (idx, self.num_batches)
+        b_from, b_to = idx * self.batch_size, (idx+1) * self.batch_size
+        src_pad = self.d['src'].get_pad() if self.d['src'].sequential else None
+        src_batch = self._pack(self.data['src'][b_from: b_to], pad_token=src_pad)
+        trg_pad = self.d['trg'].get_pad() if self.d['trg'].sequential else None
+        trg_batch = self._pack(self.data['trg'][b_from: b_to], pad_token=trg_pad)
+        return src_batch, trg_batch
 
     def sort_(self, sort_key=None):
         sort = sorted(zip(self.data['src'], self.data['trg']), key=sort_key)
         src, trg = zip(*sort)
-        self.data['src'] = src,
-        self.data['trg'] = trg
+        self.data['src'] = list(src)
+        self.data['trg'] = list(trg)
         return self
 
-    def batches(self, batch_size, **kwargs):
-        """
-        Returns a BatchIterator built from this dataset examples
-
-        Parameters:
-        - batch_size: Integer
-        """
-        total_len = len(self)
-        assert batch_size <= total_len, \
-            "Batch size larger than data [%d > %d]" % (batch_size, total_len)
-        return BatchIterator(self, batch_size, **kwargs)
-
-    def splits(self, test=0.1, dev=0.2, shuffle=False,
-               batchify=False, batch_size=None, sort_key=None, **kwargs):
+    def splits(self, test=0.1, dev=0.2, shuffle=False, sort_key=None):
         """
         Compute splits on dataset instance. For convenience, it can return
         BatchIterator objects instead of Dataset via method chaining.
@@ -228,22 +245,21 @@ class PairedDataset(Dataset):
         - dev: float less than 1 or None, dev set proportion
         - test: float less than 1 or None, test set proportion
         - shuffle: bool, whether to shuffle the datasets prior to splitting
-        - batchify: bool, whether to return BatchIterator's instead
-        - batch_size: int, only needed if batchify is True
         """
         if shuffle:
             src, trg = shuffle_pairs(self.data['src'], self.data['trg'])
         else:
             src, trg = self.data['src'], self.data['trg']
-        splits, datasets = get_splits(len(src), test, dev=dev), []
-        for i, j in zip(splits, splits[1:]):
+        splits = get_splits(len(src), test, dev=dev)
+        datasets = []
+        for idx, (start, stop) in enumerate(zip(splits, splits[1:])):
+            evaluation = self.evaluation if idx == 0 else True
             subset = PairedDataset(
-                src[i:j], trg[i:j], self.d, fitted=True).sort_(sort_key)
+                src[start:stop], trg[start:stop], self.d, self.batch_size,
+                fitted=True, gpu=self.gpu, evaluation=evaluation,
+                align_right=self.align_right).sort_(sort_key)
             datasets.append(subset)
-        if batchify:
-            return tuple([s.batches(batch_size, **kwargs) for s in datasets])
-        else:
-            return datasets
+        return tuple(datasets)
 
 
 class BlockDataset(Dataset):
@@ -278,13 +294,6 @@ class BlockDataset(Dataset):
         self.gpu = gpu
         self.evaluation = evaluation
 
-    def __len__(self):
-        """
-        The length of the dataset is computed as the number of bptt'ed batches
-        to conform the way batches are computed. See __getitem__.
-        """
-        return len(self.data) // self.bptt
-
     def _getitem(self, data, idx):
         """
         General function to get the source data to compute the batch. This
@@ -294,11 +303,17 @@ class BlockDataset(Dataset):
         idx *= self.bptt
         seq_len = min(self.bptt, len(data) - 1 - idx)
         src = Variable(data[idx:idx+seq_len], volatile=self.evaluation)
-        trg = Variable(data[idx+1:idx+seq_len+1].view(-1),
-                       volatile=self.evaluation)
+        trg = Variable(data[idx+1:idx+seq_len+1], volatile=self.evaluation)
         if self.gpu:
             src, trg = src.cuda(), trg.cuda()
         return src, trg
+
+    def __len__(self):
+        """
+        The length of the dataset is computed as the number of bptt'ed batches
+        to conform the way batches are computed. See __getitem__.
+        """
+        return len(self.data) // self.bptt
 
     def __getitem__(self, idx):
         """
